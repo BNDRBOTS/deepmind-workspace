@@ -1,0 +1,51 @@
+# ============================================================================
+# Connector Registry — Add new document sources here
+# Each connector must implement the BaseConnector interface
+# ============================================================================
+
+registry:
+  github:
+    module: "deepmind.connectors.github_connector"
+    class: "GitHubConnector"
+    display_name: "GitHub"
+    icon: "mdi-github"
+    color: "#333333"
+    config_ref: "connectors.github"
+    capabilities:
+      - "browse_repos"
+      - "browse_files"
+      - "read_file"
+      - "search_code"
+      - "list_issues"
+      - "list_prs"
+
+  dropbox:
+    module: "deepmind.connectors.dropbox_connector"
+    class: "DropboxConnector"
+    display_name: "Dropbox"
+    icon: "mdi-dropbox"
+    color: "#0061FF"
+    config_ref: "connectors.dropbox"
+    capabilities:
+      - "browse_folders"
+      - "read_file"
+      - "search_files"
+
+  google_drive:
+    module: "deepmind.connectors.gdrive_connector"
+    class: "GoogleDriveConnector"
+    display_name: "Google Drive"
+    icon: "mdi-google-drive"
+    color: "#4285F4"
+    config_ref: "connectors.google_drive"
+    capabilities:
+      - "browse_folders"
+      - "read_file"
+      - "search_files"
+      - "dev_scaffold_search"
+
+# To add a new connector (e.g., Notion, Slack):
+# 1. Create src/deepmind/connectors/notion_connector.py implementing BaseConnector
+# 2. Add entry here with module path, class name, and capabilities
+# 3. Add config section in app.yaml under connectors:
+# 4. Restart — the system auto-discovers and loads it
