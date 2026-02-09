@@ -41,7 +41,7 @@ class DeepSeekClient:
     
     @retry(
         stop=stop_after_attempt(3),
-        wait=wait_exponential_jitter(multiplier=1.0, max=10.0),
+        wait=wait_exponential_jitter(multiplier=1.0, max_wait=10.0),
         reraise=True,
     )
     async def chat_completion(
