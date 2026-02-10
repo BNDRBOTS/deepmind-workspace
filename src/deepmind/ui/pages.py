@@ -503,11 +503,8 @@ class WorkspaceUI:
         # Extract actual image description (remove trigger words)
         image_prompt = re.sub(r'(generate|create|draw|make an?)\s+(image|picture)\s+(of|showing)?\s*', '', prompt, flags=re.IGNORECASE).strip()
         
-        # Generate image
-        result = await self.flux_client.generate_image(
-            prompt=image_prompt,
-            output_dir=Path("./data/images")
-        )
+        # Generate image - flux_client reads output_dir from config
+        result = await self.flux_client.generate_image(prompt=image_prompt)
         
         # Display result
         with self.message_container:
