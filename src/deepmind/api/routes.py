@@ -11,6 +11,7 @@ from deepmind.services.conversation_service import get_conversation_service
 from deepmind.services.context_manager import get_context_manager
 from deepmind.services.vector_store import get_vector_store
 from deepmind.services.code_executor import get_code_executor
+from deepmind.services.flux_client import get_flux_client
 from deepmind.connectors.registry import get_connector_registry
 
 
@@ -116,6 +117,42 @@ async def execute_code(req: ExecuteCodeRequest):
     """
     executor = get_code_executor()
     result = executor.execute(req.code, timeout_override=req.timeout)
+    return result
+
+
+# ---- Image Generation Endpoint ----
+
+class GenerateImageRequest(BaseModel):
+    prompt: str
+    model: Optional[str] = None  # ultra/pro/dev/schnell
+    width: Optional[int] = None
+    height: Optional[int] = None
+    steps: Optional[int] = None
+
+
+@router.post("/generate-image")
+async def generate_image(req: GenerateImageRequest):
+    """
+    Generate image using FLUX models via Together AI.
+    
+    Args:
+        prompt: Text description of desired image
+        model: Model to use (ultra/pro/dev/schnell) - defaults to 'pro'
+        width: Image width (uses model default if None)
+        height: Image height (uses model default if None)
+        steps: Inference steps (uses model default if None)
+        
+    Returns:
+        Generation result with image_path, image_url, base64_data, metadata
+    """
+    flux = get_flux_client()
+    result = await flux.generate_image(
+        prompt=req.prompt,
+        model=req.model,
+        width=req.width,
+        height=req.height,
+        steps=req.steps,
+    )
     return result
 
 
