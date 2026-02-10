@@ -14,6 +14,7 @@ from deepmind.config import load_config
 from deepmind.services.database import init_database, close_database
 from deepmind.connectors.registry import get_connector_registry
 from deepmind.api.routes import router as api_router
+from deepmind.api.auth_routes import router as auth_router
 from deepmind.ui.pages import WorkspaceUI
 
 log = structlog.get_logger()
@@ -23,6 +24,7 @@ cfg = load_config()
 
 # NiceGUI creates its own FastAPI app — we mount our API on it
 nicegui_app.include_router(api_router)
+nicegui_app.include_router(auth_router)
 
 
 @nicegui_app.on_startup
