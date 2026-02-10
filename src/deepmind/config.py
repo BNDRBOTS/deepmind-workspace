@@ -100,7 +100,7 @@ class ImageModelConfig:
 class ImageGenerationModelsConfig:
     """Container for all FLUX model configurations."""
     ultra: ImageModelConfig = field(default_factory=lambda: ImageModelConfig(
-        name="black-forest-labs/FLUX.1-pro-ultra",
+        name="black-forest-labs/FLUX.1.1-pro",
         max_width=2048,
         max_height=2048,
         steps=50,
