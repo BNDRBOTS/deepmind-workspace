@@ -54,6 +54,7 @@ async def shutdown():
     # Close LLM clients
     from deepmind.services.deepseek_client import get_deepseek_client
     from deepmind.services.openai_client import get_openai_client
+    from deepmind.services.flux_client import get_flux_client
     
     try:
         await get_deepseek_client().close()
@@ -62,6 +63,11 @@ async def shutdown():
     
     try:
         await get_openai_client().close()
+    except Exception:
+        pass
+    
+    try:
+        await get_flux_client().close()
     except Exception:
         pass
     
