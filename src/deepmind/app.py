@@ -2,11 +2,13 @@
 Application entry point — Creates and configures the NiceGUI + FastAPI app.
 """
 import asyncio
+import os
 import structlog
 from contextlib import asynccontextmanager
 
 from nicegui import ui, app as nicegui_app
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 from deepmind.config import load_config
 from deepmind.services.database import init_database, close_database
@@ -15,7 +17,6 @@ from deepmind.api.routes import router as api_router
 from deepmind.ui.pages import WorkspaceUI
 
 log = structlog.get_logger()
-
 
 # Load config early
 cfg = load_config()
@@ -59,6 +60,18 @@ async def shutdown():
     log.info("app_stopped")
 
 
+# ---- Health Check Endpoint for Render ----
+
+@nicegui_app.get("/api/health")
+async def health_check():
+    """Health check endpoint for Render monitoring."""
+    return JSONResponse({
+        "status": "healthy",
+        "version": cfg.app.version,
+        "service": "deepmind-workspace"
+    })
+
+
 # ---- NiceGUI Page ----
 
 @ui.page("/")
@@ -70,3 +83,14 @@ def main_page():
 
 # The app object for uvicorn
 app = nicegui_app
+
+# For local development with python -m deepmind.cli
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", os.getenv("APP_PORT", 8080)))
+    ui.run(
+        host="0.0.0.0",
+        port=port,
+        reload=False,
+        show=False,
+        title="DeepMind Workspace"
+    )
