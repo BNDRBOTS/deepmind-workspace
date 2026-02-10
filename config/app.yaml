@@ -54,7 +54,7 @@ image_generation:
   # Model selection (priority order)
   models:
     ultra:  # Highest quality, unfiltered
-      name: "black-forest-labs/FLUX.1-pro-ultra"
+      name: "black-forest-labs/FLUX.1.1-pro"
       max_width: 2048
       max_height: 2048
       steps: 50
