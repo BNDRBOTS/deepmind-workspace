@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from deepmind.services.conversation_service import get_conversation_service
 from deepmind.services.context_manager import get_context_manager
 from deepmind.services.vector_store import get_vector_store
+from deepmind.services.code_executor import get_code_executor
 from deepmind.connectors.registry import get_connector_registry
 
 
@@ -92,6 +93,30 @@ async def unpin_document(pin_id: str):
     svc = get_conversation_service()
     await svc.unpin_document(pin_id)
     return {"status": "unpinned"}
+
+
+# ---- Code Execution Endpoint ----
+
+class ExecuteCodeRequest(BaseModel):
+    code: str
+    timeout: Optional[int] = None
+
+
+@router.post("/execute-code")
+async def execute_code(req: ExecuteCodeRequest):
+    """
+    Execute Python code in RestrictedPython sandbox.
+    
+    Args:
+        code: Python code to execute
+        timeout: Optional timeout override (seconds)
+        
+    Returns:
+        Execution result with stdout, stderr, success status
+    """
+    executor = get_code_executor()
+    result = executor.execute(req.code, timeout_override=req.timeout)
+    return result
 
 
 # ---- Connector Endpoints ----
