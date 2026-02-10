@@ -12,6 +12,7 @@ from deepmind.models.conversation import Conversation, Message, PinnedDocument, 
 from deepmind.services.database import get_session
 from deepmind.services.context_manager import get_context_manager
 from deepmind.services.deepseek_client import get_deepseek_client
+from deepmind.services.openai_client import get_openai_client
 from deepmind.services.vector_store import get_vector_store
 
 
@@ -36,7 +37,8 @@ class ConversationService:
     
     def __init__(self):
         self.ctx = get_context_manager()
-        self.llm = get_deepseek_client()
+        self.deepseek = get_deepseek_client()
+        self.openai = get_openai_client()
         self.vectors = get_vector_store()
         self.cfg = get_config()
     
@@ -95,10 +97,18 @@ class ConversationService:
         self,
         conversation_id: str,
         user_content: str,
+        model: str = "deepseek",
     ) -> AsyncGenerator[str, None]:
         """
         Send a user message and stream the assistant response.
-        Yields content deltas for real-time UI updates.
+        
+        Args:
+            conversation_id: ID of the conversation
+            user_content: User's message text
+            model: LLM to use - "deepseek" or "gpt4o" (default: deepseek)
+        
+        Yields:
+            Content deltas for real-time UI updates.
         """
         # Store user message
         user_msg = await self._store_message(conversation_id, "user", user_content)
@@ -110,7 +120,7 @@ class ConversationService:
         rag_chunks = self._get_rag_chunks(user_content)
         
         # Check for dev-scaffold trigger (Google Drive search)
-        scaffold_query = await self.llm.analyze_for_dev_scaffold(user_content)
+        scaffold_query = await self.deepseek.analyze_for_dev_scaffold(user_content)
         if scaffold_query:
             scaffold_chunks = self._get_scaffold_chunks(scaffold_query)
             if scaffold_chunks:
@@ -124,16 +134,27 @@ class ConversationService:
             rag_chunks=[c["text"] for c in rag_chunks] if rag_chunks else None,
         )
         
-        # Stream response from DeepSeek
+        # Route to selected model
         full_response = ""
-        async for delta in self.llm.chat_completion_stream(messages=context_messages):
-            full_response += delta
-            yield delta
+        model_name = ""
+        
+        if model == "gpt4o":
+            # Stream from OpenAI GPT-4o
+            model_name = self.cfg.openai.model if hasattr(self.cfg, 'openai') else "gpt-4o"
+            async for delta in self.openai.stream_chat(messages=context_messages):
+                full_response += delta
+                yield delta
+        else:
+            # Stream from DeepSeek (default)
+            model_name = self.cfg.deepseek.chat_model
+            async for delta in self.deepseek.chat_completion_stream(messages=context_messages):
+                full_response += delta
+                yield delta
         
         # Store assistant message
         assistant_msg = await self._store_message(
             conversation_id, "assistant", full_response,
-            model_used=self.cfg.deepseek.chat_model,
+            model_used=model_name,
         )
         
         # Update conversation metadata
@@ -155,10 +176,12 @@ class ConversationService:
         # Check if summarization is needed
         await self.ctx.check_and_summarize(conversation_id)
     
-    async def send_message_sync(self, conversation_id: str, user_content: str) -> str:
+    async def send_message_sync(
+        self, conversation_id: str, user_content: str, model: str = "deepseek"
+    ) -> str:
         """Non-streaming variant — returns full response."""
         full = ""
-        async for delta in self.send_message(conversation_id, user_content):
+        async for delta in self.send_message(conversation_id, user_content, model=model):
             full += delta
         return full
     
