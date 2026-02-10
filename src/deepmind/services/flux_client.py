@@ -1,26 +1,52 @@
 """
-FLUX.1 Image Generation Client using Together AI.
-Generates images from text prompts using FLUX.1-schnell model.
+FLUX Image Generation Client using Together AI.
+Supports multiple FLUX models including unfiltered pro/ultra variants.
+Inline ChatGPT-style rendering with disk storage.
 """
 import os
 import httpx
 import base64
-from typing import Optional, Dict
+import hashlib
+import time
+from typing import Optional, Dict, Literal
 from pathlib import Path
 import structlog
 
+from deepmind.config import get_config
+
 log = structlog.get_logger()
+
+ModelType = Literal["ultra", "pro", "dev", "schnell"]
 
 
 class FluxClient:
-    """Client for FLUX.1 image generation via Together AI."""
+    """
+    Client for FLUX image generation via Together AI.
+    
+    Supported models:
+    - ultra: FLUX.1-pro-ultra (2048x2048, unfiltered, highest quality)
+    - pro: FLUX.1-pro (1440x1440, unfiltered, high quality) **DEFAULT**
+    - dev: FLUX.1-dev (1024x1024, unfiltered, good quality)
+    - schnell: FLUX.1-schnell (1024x768, filtered, fast preview)
+    """
     
     def __init__(self):
-        self.api_key = os.getenv("TOGETHER_API_KEY")
-        self.base_url = os.getenv("TOGETHER_BASE_URL", "https://api.together.xyz/v1")
-        self.model = os.getenv("FLUX_MODEL", "black-forest-labs/FLUX.1-schnell")
-        self.client = httpx.AsyncClient(timeout=120.0)
+        cfg = get_config()
+        
+        self.api_key = cfg.image_generation.api_key
+        self.base_url = cfg.image_generation.base_url
+        self.models = cfg.image_generation.models
+        self.default_model = cfg.image_generation.default_model
+        self.timeout = cfg.image_generation.timeout_seconds
+        self.output_dir = Path(cfg.image_generation.output_dir)
+        self.save_to_disk = cfg.image_generation.save_to_disk
+        
+        self.client = httpx.AsyncClient(timeout=self.timeout)
         self._closed = False
+        
+        # Ensure output directory exists
+        if self.save_to_disk:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
         
         if not self.api_key:
             log.warning("flux_client_no_key", message="TOGETHER_API_KEY not set")
@@ -28,28 +54,31 @@ class FluxClient:
     async def generate_image(
         self,
         prompt: str,
-        width: int = 1024,
-        height: int = 768,
-        steps: int = 4,  # FLUX.1-schnell optimized for 4 steps
-        output_dir: Optional[Path] = None,
+        model: ModelType = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        steps: Optional[int] = None,
     ) -> Dict[str, any]:
         """
         Generate image from text prompt.
         
         Args:
             prompt: Text description of desired image
-            width: Image width (default 1024)
-            height: Image height (default 768)
-            steps: Number of inference steps (4 for schnell)
-            output_dir: Directory to save image (if None, returns base64)
+            model: Model to use (ultra/pro/dev/schnell) - defaults to 'pro'
+            width: Image width (uses model default if None)
+            height: Image height (uses model default if None)
+            steps: Inference steps (uses model default if None)
             
         Returns:
             Dict with keys:
                 - success: bool
-                - image_url: str (local path if saved, or base64 data URL)
-                - base64_data: str (base64 encoded image)
+                - image_path: str (local file path for inline display)
+                - image_url: str (file:// URL for rendering)
                 - prompt: str (original prompt)
                 - model: str (model used)
+                - width: int
+                - height: int
+                - unfiltered: bool (whether model is unfiltered)
                 - error: str (if failed)
         """
         if not self.api_key:
@@ -59,13 +88,22 @@ class FluxClient:
                 "prompt": prompt,
             }
         
+        # Select model
+        model_key = model or self.default_model
+        model_config = getattr(self.models, model_key)
+        
+        model_name = model_config.name
+        width = width or model_config.max_width
+        height = height or model_config.max_height
+        steps = steps or model_config.steps
+        
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
         
         payload = {
-            "model": self.model,
+            "model": model_name,
             "prompt": prompt,
             "width": width,
             "height": height,
@@ -75,7 +113,12 @@ class FluxClient:
         }
         
         try:
-            log.info("flux_generate_start", prompt=prompt[:100], model=self.model)
+            log.info(
+                "flux_generate_start",
+                prompt=prompt[:100],
+                model=model_key,
+                unfiltered=model_config.unfiltered,
+            )
             
             response = await self.client.post(
                 f"{self.base_url}/images/generations",
@@ -90,36 +133,49 @@ class FluxClient:
                 raise ValueError("No image data in response")
             
             image_b64 = data["data"][0]["b64_json"]
+            image_bytes = base64.b64decode(image_b64)
             
-            # Save to file if output_dir provided
+            # Generate unique filename
+            timestamp = int(time.time())
+            prompt_hash = hashlib.md5(prompt.encode()).hexdigest()[:8]
+            filename = f"flux_{model_key}_{timestamp}_{prompt_hash}.png"
+            
+            # Save to disk for inline display
             image_path = None
-            if output_dir:
-                output_dir = Path(output_dir)
-                output_dir.mkdir(parents=True, exist_ok=True)
-                
-                # Generate filename from prompt (sanitized)
-                import hashlib
-                import time
-                filename = f"flux_{int(time.time())}_{hashlib.md5(prompt.encode()).hexdigest()[:8]}.png"
-                image_path = output_dir / filename
-                
-                # Decode and save
-                image_bytes = base64.b64decode(image_b64)
+            image_url = None
+            
+            if self.save_to_disk:
+                image_path = self.output_dir / filename
                 image_path.write_bytes(image_bytes)
                 
-                log.info("flux_image_saved", path=str(image_path))
+                # Create file:// URL for NiceGUI rendering
+                image_url = f"file://{image_path.absolute()}"
+                
+                log.info(
+                    "flux_image_saved",
+                    path=str(image_path),
+                    size_kb=len(image_bytes) / 1024,
+                )
             
-            log.info("flux_generate_success", prompt=prompt[:100])
+            log.info(
+                "flux_generate_success",
+                prompt=prompt[:100],
+                model=model_key,
+                unfiltered=model_config.unfiltered,
+            )
             
             return {
                 "success": True,
                 "image_path": str(image_path) if image_path else None,
-                "image_url": f"data:image/png;base64,{image_b64}",
-                "base64_data": image_b64,
+                "image_url": image_url,
+                "base64_data": image_b64,  # Fallback for display
                 "prompt": prompt,
-                "model": self.model,
+                "model": model_key,
+                "model_name": model_name,
                 "width": width,
                 "height": height,
+                "unfiltered": model_config.unfiltered,
+                "cost_estimate": model_config.cost_per_image,
             }
         
         except httpx.HTTPStatusError as e:
