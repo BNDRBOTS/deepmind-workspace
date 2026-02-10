@@ -51,9 +51,19 @@ async def shutdown():
         except Exception:
             pass
     
-    # Close DeepSeek client
+    # Close LLM clients
     from deepmind.services.deepseek_client import get_deepseek_client
-    await get_deepseek_client().close()
+    from deepmind.services.openai_client import get_openai_client
+    
+    try:
+        await get_deepseek_client().close()
+    except Exception:
+        pass
+    
+    try:
+        await get_openai_client().close()
+    except Exception:
+        pass
     
     # Close database
     await close_database()
