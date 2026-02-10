@@ -30,6 +30,9 @@ COPY scripts/ scripts/
 # Install Python dependencies with extended timeout
 RUN pip install --timeout=300 -e .
 
+# Verify RestrictedPython installation (critical security dependency)
+RUN python -c "import RestrictedPython; print(RestrictedPython.__version__)"
+
 # Pre-download embedding model during build (not runtime)
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')" && \
     rm -rf /root/.cache
