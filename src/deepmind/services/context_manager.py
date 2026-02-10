@@ -221,6 +221,22 @@ class ContextManager:
             
             return True
     
+    def get_stats(self, conversation_id: str) -> Dict:
+        """Synchronous wrapper for UI - returns simplified stats."""
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            stats = loop.run_until_complete(self.get_context_stats(conversation_id))
+            return {
+                "current_tokens": stats.get("total_stored_tokens", 0),
+                "max_tokens": stats.get("max_context_tokens", self.cfg.context.max_tokens),
+            }
+        except:
+            return {
+                "current_tokens": 0,
+                "max_tokens": self.cfg.context.max_tokens,
+            }
+    
     async def get_context_stats(self, conversation_id: str) -> Dict:
         """Get current context statistics for the UI indicator."""
         async with get_session() as session:
