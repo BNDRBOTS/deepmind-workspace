@@ -1,11 +1,13 @@
 """
 Main NiceGUI page — Pro-grade ChatGPT/Perplexity-like interface.
-Features: Streaming indicators, markdown rendering, smooth animations, loading states, model selection.
+Features: Streaming indicators, markdown rendering, smooth animations, loading states, model selection, code execution, image generation.
 """
 import asyncio
 import markdown
+import re
 from typing import Optional
 from datetime import datetime
+from pathlib import Path
 
 from nicegui import ui, app
 
@@ -13,6 +15,8 @@ from deepmind.config import get_config
 from deepmind.ui.theme import get_theme, generate_css, DARK_THEME, LIGHT_THEME
 from deepmind.services.conversation_service import get_conversation_service
 from deepmind.services.context_manager import get_context_manager
+from deepmind.services.code_executor import get_code_executor
+from deepmind.services.flux_client import get_flux_client
 from deepmind.connectors.registry import get_connector_registry
 
 
@@ -40,6 +44,10 @@ class WorkspaceUI:
         self.stop_button = None
         self.typing_indicator = None
         self.model_select = None
+        
+        # Tool services
+        self.code_executor = get_code_executor()
+        self.flux_client = get_flux_client()
         
         # Markdown renderer
         self.md = markdown.Markdown(extensions=['fenced_code', 'codehilite', 'tables', 'nl2br'])
@@ -281,7 +289,7 @@ class WorkspaceUI:
         await self._scroll_to_bottom()
     
     def _render_message(self, msg: dict, theme: dict):
-        """Render a single message with markdown support."""
+        """Render a single message with markdown support and code execution controls."""
         is_user = msg["role"] == "user"
         bubble_class = "message-bubble message-user" if is_user else "message-bubble message-assistant"
         
@@ -299,13 +307,19 @@ class WorkspaceUI:
                         f"color: {theme['text_primary']}; font-size: 14px;"
                     )
                     
-                    # Message content (rendered as markdown for assistant)
+                    # Message content
                     if is_user:
                         ui.label(msg["content"]).style(f"color: {theme['text_primary']}; white-space: pre-wrap;")
                     else:
-                        # Render markdown
+                        # Render markdown with code execution buttons
                         html_content = self.md.convert(msg["content"])
                         ui.html(html_content).classes("markdown-content")
+                        
+                        # Extract code blocks for execution
+                        code_blocks = self._extract_code_blocks(msg["content"])
+                        if code_blocks:
+                            for idx, code_block in enumerate(code_blocks):
+                                self._render_code_execution_ui(code_block, idx, theme)
                     
                     # Timestamp + Model indicator
                     with ui.row().classes("items-center gap-2 mt-1"):
@@ -313,6 +327,75 @@ class WorkspaceUI:
                             ui.label(self._format_time(msg["created_at"])).classes("token-counter")
                         if not is_user and msg.get("model_used"):
                             ui.label(f"· {msg['model_used']}").classes("token-counter")
+    
+    def _extract_code_blocks(self, content: str) -> list:
+        """Extract Python code blocks from markdown content."""
+        pattern = r'```python\n(.*?)```'
+        matches = re.findall(pattern, content, re.DOTALL)
+        return matches
+    
+    def _render_code_execution_ui(self, code: str, idx: int, theme: dict):
+        """Render code execution button and output area."""
+        with ui.column().classes("w-full gap-2 mt-2"):
+            with ui.row().classes("items-center gap-2"):
+                ui.button(
+                    "Run Code",
+                    icon="play_arrow",
+                    on_click=lambda c=code: self._execute_code(c)
+                ).props("dense no-caps").style(
+                    f"background: {theme['success']}; color: white; border-radius: 8px;"
+                )
+                ui.label(f"Python code block {idx + 1}").classes("token-counter")
+            
+            # Output placeholder (will be filled on execution)
+            output_container = ui.column().classes("w-full").style("min-height: 0;")
+            # Store reference for later
+            setattr(self, f"_code_output_{idx}", output_container)
+    
+    async def _execute_code(self, code: str):
+        """Execute Python code and display results."""
+        theme = get_theme(self.theme_mode)
+        
+        ui.notify("Executing code...", type="info")
+        
+        # Run in thread pool to avoid blocking UI
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, self.code_executor.execute, code, True
+        )
+        
+        # Display results
+        with self.message_container:
+            with ui.card().classes("message-bubble message-assistant").style(
+                f"background: {theme['bg_tertiary']}; border: 1px solid {theme['border']};"
+            ):
+                with ui.row().classes("w-full items-start gap-3"):
+                    ui.icon("code", size="sm").style(f"color: {theme['success' if result['success'] else 'error']}")
+                    with ui.column().classes("flex-grow gap-2"):
+                        ui.label("Code Execution Result").classes("font-semibold").style(
+                            f"color: {theme['text_primary']}; font-size: 14px;"
+                        )
+                        
+                        if result["success"]:
+                            ui.label(f"✓ Completed in {result['execution_time']:.2f}s").style(
+                                f"color: {theme['success']}; font-size: 13px;"
+                            )
+                            if result["stdout"]:
+                                with ui.card().style(f"background: {theme['bg_primary']}; padding: 12px;"):
+                                    ui.label("Output:").classes("font-semibold mb-1")
+                                    ui.label(result["stdout"]).style("white-space: pre-wrap; font-family: monospace;")
+                        else:
+                            ui.label(f"✗ Error").style(f"color: {theme['error']}; font-size: 13px;")
+                            with ui.card().style(f"background: {theme['bg_primary']}; padding: 12px;"):
+                                ui.label("Error:").classes("font-semibold mb-1").style(f"color: {theme['error']};")
+                                ui.label(result["error"]).style(
+                                    f"white-space: pre-wrap; font-family: monospace; color: {theme['error']};"
+                                )
+        
+        await self._scroll_to_bottom()
+        ui.notify(
+            "Code executed successfully" if result["success"] else "Code execution failed",
+            type="positive" if result["success"] else "negative"
+        )
     
     async def _send_message(self):
         """Send user message and stream AI response."""
@@ -333,6 +416,11 @@ class WorkspaceUI:
         theme = get_theme(self.theme_mode)
         
         try:
+            # Check if user is requesting image generation
+            if self._is_image_request(user_text):
+                await self._handle_image_generation(user_text, theme)
+                return
+            
             # Show user message immediately
             with self.message_container:
                 self._render_message({"role": "user", "content": user_text, "created_at": datetime.now().isoformat()}, theme)
@@ -394,6 +482,58 @@ class WorkspaceUI:
                     self.typing_indicator.parent_slot.parent.delete()
                 except:
                     pass
+    
+    def _is_image_request(self, text: str) -> bool:
+        """Detect if user is requesting image generation."""
+        keywords = ["generate image", "create image", "draw", "make an image", "flux"]
+        text_lower = text.lower()
+        return any(keyword in text_lower for keyword in keywords)
+    
+    async def _handle_image_generation(self, prompt: str, theme: dict):
+        """Handle image generation request."""
+        # Show user message
+        with self.message_container:
+            self._render_message({"role": "user", "content": prompt, "created_at": datetime.now().isoformat()}, theme)
+        
+        await self._scroll_to_bottom()
+        
+        # Show generation indicator
+        ui.notify("Generating image with FLUX.1...", type="info")
+        
+        # Extract actual image description (remove trigger words)
+        image_prompt = re.sub(r'(generate|create|draw|make an?)\s+(image|picture)\s+(of|showing)?\s*', '', prompt, flags=re.IGNORECASE).strip()
+        
+        # Generate image
+        result = await self.flux_client.generate_image(
+            prompt=image_prompt,
+            output_dir=Path("./data/images")
+        )
+        
+        # Display result
+        with self.message_container:
+            with ui.card().classes("message-bubble message-assistant"):
+                with ui.row().classes("w-full items-start gap-3"):
+                    ui.icon("image", size="sm").style(f"color: {theme['accent']}")
+                    with ui.column().classes("flex-grow gap-2"):
+                        ui.label("FLUX.1 Image Generation").classes("font-semibold").style(
+                            f"color: {theme['text_primary']}; font-size: 14px;"
+                        )
+                        
+                        if result["success"]:
+                            ui.label(f"✓ Generated: {image_prompt}").style(f"color: {theme['success']};")
+                            # Display image
+                            ui.image(result["image_url"]).style("max-width: 100%; border-radius: 12px; margin-top: 8px;")
+                            if result["image_path"]:
+                                ui.label(f"Saved to: {result['image_path']}").classes("token-counter")
+                        else:
+                            ui.label(f"✗ Generation failed").style(f"color: {theme['error']};")
+                            ui.label(result["error"]).style(f"color: {theme['error']}; font-size: 13px;")
+        
+        await self._scroll_to_bottom()
+        
+        self.is_streaming = False
+        self.send_button.style("display: block;")
+        self.stop_button.style("display: none;")
     
     async def _stop_generation(self):
         """Stop ongoing generation."""
