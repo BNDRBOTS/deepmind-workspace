@@ -1,147 +1,94 @@
 """
 User and Role models for authentication system.
-Enterprise-grade: bcrypt password hashing, role-based access control, audit fields.
+Enterprise-grade with bcrypt password hashing, role-based access control.
 """
-from datetime import datetime, timezone
-from typing import Optional
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Table, Column, Integer
+from datetime import datetime
+from typing import Optional, List
+from sqlalchemy import String, Boolean, DateTime, ForeignKey, Table, Column
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from passlib.context import CryptContext
 
 from deepmind.models.conversation import Base
 
+# Password hashing context
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=12)
 
 # Association table for many-to-many User-Role relationship
 user_roles = Table(
-    'user_roles',
+    "user_roles",
     Base.metadata,
-    Column('user_id', String, ForeignKey('users.id', ondelete='CASCADE'), primary_key=True),
-    Column('role_id', String, ForeignKey('roles.id', ondelete='CASCADE'), primary_key=True),
+    Column("user_id", String, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column("role_id", String, ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True),
 )
 
 
 class Role(Base):
-    """
-    Role model for RBAC (Role-Based Access Control).
-    
-    Default roles:
-    - admin: Full system access, user management
-    - user: Standard user access to conversations, connectors
-    - readonly: View-only access
-    """
-    __tablename__ = 'roles'
-    
+    """Role for RBAC."""
+    __tablename__ = "roles"
+
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
-    description: Mapped[Optional[str]] = mapped_column(String(255))
-    
-    # Permissions (future expansion)
-    can_execute_code: Mapped[bool] = mapped_column(Boolean, default=False)
-    can_generate_images: Mapped[bool] = mapped_column(Boolean, default=False)
-    can_manage_users: Mapped[bool] = mapped_column(Boolean, default=False)
-    can_access_all_conversations: Mapped[bool] = mapped_column(Boolean, default=False)
-    
-    # Audit fields
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False
-    )
-    
+    description: Mapped[Optional[str]] = mapped_column(String(200))
+    permissions: Mapped[Optional[str]] = mapped_column(String)  # JSON string of permissions
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
     # Relationships
-    users: Mapped[list["User"]] = relationship(
+    users: Mapped[List["User"]] = relationship(
         "User",
         secondary=user_roles,
-        back_populates="roles"
+        back_populates="roles",
     )
-    
+
     def __repr__(self) -> str:
-        return f"<Role(id={self.id}, name={self.name})>"
+        return f"<Role {self.name}>"
 
 
 class User(Base):
-    """
-    User model for authentication.
-    
-    Security features:
-    - Bcrypt password hashing (12 rounds)
-    - Account locking after failed attempts
-    - Email verification support
-    - Session tracking
-    """
-    __tablename__ = 'users'
-    
+    """User model with authentication."""
+    __tablename__ = "users"
+
     id: Mapped[str] = mapped_column(String, primary_key=True)
     username: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
-    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
-    
-    # Password stored as bcrypt hash
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    
-    # Account status
+    email: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    full_name: Mapped[Optional[str]] = mapped_column(String(100))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    is_verified: Mapped[bool] = mapped_column(Boolean, default=False)
-    is_locked: Mapped[bool] = mapped_column(Boolean, default=False)
-    
-    # Security tracking
-    failed_login_attempts: Mapped[int] = mapped_column(Integer, default=0)
-    last_login: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    last_failed_login: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    locked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    
-    # Verification
-    verification_token: Mapped[Optional[str]] = mapped_column(String(255))
-    verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    
-    # Password reset
-    reset_token: Mapped[Optional[str]] = mapped_column(String(255))
-    reset_token_expires: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    
-    # Audit fields
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False
-    )
+    is_superuser: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_login: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
-        nullable=False
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
     )
-    
+
     # Relationships
-    roles: Mapped[list[Role]] = relationship(
+    roles: Mapped[List[Role]] = relationship(
         "Role",
         secondary=user_roles,
-        back_populates="users"
+        back_populates="users",
     )
-    
+
     def __repr__(self) -> str:
-        return f"<User(id={self.id}, username={self.username}, email={self.email})>"
-    
+        return f"<User {self.username}>"
+
+    def set_password(self, password: str) -> None:
+        """Hash and set password using bcrypt."""
+        self.hashed_password = pwd_context.hash(password)
+
+    def verify_password(self, password: str) -> bool:
+        """Verify password against stored hash."""
+        return pwd_context.verify(password, self.hashed_password)
+
     def has_role(self, role_name: str) -> bool:
         """Check if user has specific role."""
         return any(role.name == role_name for role in self.roles)
-    
+
     def has_permission(self, permission: str) -> bool:
-        """
-        Check if user has specific permission through any of their roles.
-        
-        Supported permissions:
-        - execute_code
-        - generate_images
-        - manage_users
-        - access_all_conversations
-        """
-        permission_map = {
-            'execute_code': 'can_execute_code',
-            'generate_images': 'can_generate_images',
-            'manage_users': 'can_manage_users',
-            'access_all_conversations': 'can_access_all_conversations',
-        }
-        
-        attr = permission_map.get(permission)
-        if not attr:
-            return False
-        
-        return any(getattr(role, attr, False) for role in self.roles)
+        """Check if user has specific permission through any role."""
+        import json
+        for role in self.roles:
+            if role.permissions:
+                perms = json.loads(role.permissions)
+                if permission in perms:
+                    return True
+        return False
