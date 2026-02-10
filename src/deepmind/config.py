@@ -62,6 +62,95 @@ class DeepSeekConfig:
 
 
 @dataclass
+class OpenAIConfig:
+    api_key: str = ""
+    base_url: str = "https://api.openai.com/v1"
+    model: str = "gpt-4o"
+    max_tokens: int = 4096
+    temperature: float = 0.7
+    top_p: float = 0.95
+    stream: bool = True
+    timeout_seconds: int = 120
+    retry_attempts: int = 3
+    retry_backoff: float = 2.0
+
+
+@dataclass
+class CodeExecutionConfig:
+    enabled: bool = True
+    timeout_seconds: int = 300
+    max_output_bytes: int = 10485760  # 10MB
+    max_recursion_depth: int = 1000
+    allow_network: bool = False
+    restricted_python: bool = True
+
+
+@dataclass
+class ImageModelConfig:
+    """Configuration for a single FLUX model variant."""
+    name: str
+    max_width: int
+    max_height: int
+    steps: int
+    cost_per_image: float
+    unfiltered: bool
+
+
+@dataclass
+class ImageGenerationModelsConfig:
+    """Container for all FLUX model configurations."""
+    ultra: ImageModelConfig = field(default_factory=lambda: ImageModelConfig(
+        name="black-forest-labs/FLUX.1-pro-ultra",
+        max_width=2048,
+        max_height=2048,
+        steps=50,
+        cost_per_image=0.04,
+        unfiltered=True,
+    ))
+    pro: ImageModelConfig = field(default_factory=lambda: ImageModelConfig(
+        name="black-forest-labs/FLUX.1-pro",
+        max_width=1440,
+        max_height=1440,
+        steps=25,
+        cost_per_image=0.02,
+        unfiltered=True,
+    ))
+    dev: ImageModelConfig = field(default_factory=lambda: ImageModelConfig(
+        name="black-forest-labs/FLUX.1-dev",
+        max_width=1024,
+        max_height=1024,
+        steps=20,
+        cost_per_image=0.01,
+        unfiltered=True,
+    ))
+    schnell: ImageModelConfig = field(default_factory=lambda: ImageModelConfig(
+        name="black-forest-labs/FLUX.1-schnell",
+        max_width=1024,
+        max_height=768,
+        steps=4,
+        cost_per_image=0.005,
+        unfiltered=False,
+    ))
+
+
+@dataclass
+class ImageGenerationConfig:
+    enabled: bool = True
+    provider: str = "together"
+    api_key: str = ""
+    base_url: str = "https://api.together.xyz/v1"
+    models: ImageGenerationModelsConfig = field(default_factory=ImageGenerationModelsConfig)
+    default_model: str = "pro"
+    default_width: int = 1024
+    default_height: int = 1024
+    timeout_seconds: int = 180
+    retry_attempts: int = 2
+    save_to_disk: bool = True
+    output_dir: str = "/data/generated_images"
+    inline_display: bool = True
+
+
+@dataclass
 class DatabaseConfig:
     sqlite_path: str = "./data/conversations.db"
     chromadb_path: str = "./data/chromadb"
@@ -145,6 +234,28 @@ class ConnectorsConfig:
 
 
 @dataclass
+class CodeControlsConfig:
+    """UI controls for code execution settings."""
+    show_timeout_slider: bool = True
+    show_output_limit_slider: bool = True
+    timeout_min: int = 10
+    timeout_max: int = 600
+    output_limit_presets: List[str] = field(default_factory=lambda: ["1MB", "10MB", "50MB", "100MB"])
+
+
+@dataclass
+class ImageControlsConfig:
+    """UI controls for image generation settings."""
+    show_model_selector: bool = True
+    show_size_presets: bool = True
+    show_quality_slider: bool = True
+    size_presets: List[str] = field(default_factory=lambda: [
+        "512x512", "768x768", "1024x1024",
+        "1024x1536 (Portrait)", "1536x1024 (Landscape)", "2048x2048 (Ultra)"
+    ])
+
+
+@dataclass
 class UIConfig:
     theme: str = "dark"
     title: str = "DeepMind Workspace"
@@ -155,12 +266,17 @@ class UIConfig:
     animations: bool = True
     font_family: str = "Inter, system-ui, -apple-system, sans-serif"
     code_font: str = "JetBrains Mono, Fira Code, monospace"
+    code_controls: CodeControlsConfig = field(default_factory=CodeControlsConfig)
+    image_controls: ImageControlsConfig = field(default_factory=ImageControlsConfig)
 
 
 @dataclass
 class Config:
     app: AppConfig = field(default_factory=AppConfig)
     deepseek: DeepSeekConfig = field(default_factory=DeepSeekConfig)
+    openai: OpenAIConfig = field(default_factory=OpenAIConfig)
+    code_execution: CodeExecutionConfig = field(default_factory=CodeExecutionConfig)
+    image_generation: ImageGenerationConfig = field(default_factory=ImageGenerationConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
     embeddings: EmbeddingConfig = field(default_factory=EmbeddingConfig)
@@ -168,23 +284,16 @@ class Config:
     ui: UIConfig = field(default_factory=UIConfig)
 
 
-def _dict_to_dataclass(cls, data: Dict[str, Any]):
-    """Recursively convert a dict to nested dataclasses."""
-    import dataclasses
-    if not dataclasses.is_dataclass(cls):
-        return data
-    fieldtypes = {f.name: f.type for f in dataclasses.fields(cls)}
-    kwargs = {}
-    for k, v in data.items():
-        if k in fieldtypes:
-            ft = fieldtypes[k]
-            if isinstance(ft, str):
-                ft = eval(ft) if ft in dir() else str
-            if dataclasses.is_dataclass(ft) and isinstance(v, dict):
-                kwargs[k] = _dict_to_dataclass(ft, v)
-            else:
-                kwargs[k] = v
-    return cls(**kwargs)
+def _parse_model_config(model_data: Dict[str, Any]) -> ImageModelConfig:
+    """Parse a single model configuration from YAML."""
+    return ImageModelConfig(
+        name=model_data.get("name", ""),
+        max_width=model_data.get("max_width", 1024),
+        max_height=model_data.get("max_height", 1024),
+        steps=model_data.get("steps", 20),
+        cost_per_image=model_data.get("cost_per_image", 0.01),
+        unfiltered=model_data.get("unfiltered", False),
+    )
 
 
 _CONFIG: Optional[Config] = None
@@ -215,18 +324,52 @@ def load_config(config_path: Optional[str] = None) -> Config:
     resolved = _resolve_env(raw)
     
     cfg = Config()
+    
+    # Parse simple configs
     if "app" in resolved:
         cfg.app = AppConfig(**{k: v for k, v in resolved["app"].items() if hasattr(cfg.app, k)})
+    
     if "deepseek" in resolved:
         cfg.deepseek = DeepSeekConfig(**{k: v for k, v in resolved["deepseek"].items() if hasattr(cfg.deepseek, k)})
+    
+    if "openai" in resolved:
+        cfg.openai = OpenAIConfig(**{k: v for k, v in resolved["openai"].items() if hasattr(cfg.openai, k)})
+    
+    if "code_execution" in resolved:
+        cfg.code_execution = CodeExecutionConfig(**{k: v for k, v in resolved["code_execution"].items() if hasattr(cfg.code_execution, k)})
+    
     if "database" in resolved:
         cfg.database = DatabaseConfig(**{k: v for k, v in resolved["database"].items() if hasattr(cfg.database, k)})
+    
     if "context" in resolved:
         cfg.context = ContextConfig(**{k: v for k, v in resolved["context"].items() if hasattr(cfg.context, k)})
+    
     if "embeddings" in resolved:
         cfg.embeddings = EmbeddingConfig(**{k: v for k, v in resolved["embeddings"].items() if hasattr(cfg.embeddings, k)})
-    if "ui" in resolved:
-        cfg.ui = UIConfig(**{k: v for k, v in resolved["ui"].items() if hasattr(cfg.ui, k)})
+    
+    # Parse image_generation with nested models
+    if "image_generation" in resolved:
+        img_gen = resolved["image_generation"]
+        
+        # Parse models if present
+        models = ImageGenerationModelsConfig()
+        if "models" in img_gen:
+            models_data = img_gen["models"]
+            if "ultra" in models_data:
+                models.ultra = _parse_model_config(models_data["ultra"])
+            if "pro" in models_data:
+                models.pro = _parse_model_config(models_data["pro"])
+            if "dev" in models_data:
+                models.dev = _parse_model_config(models_data["dev"])
+            if "schnell" in models_data:
+                models.schnell = _parse_model_config(models_data["schnell"])
+        
+        # Build ImageGenerationConfig
+        img_gen_clean = {k: v for k, v in img_gen.items() if k != "models" and hasattr(cfg.image_generation, k)}
+        cfg.image_generation = ImageGenerationConfig(**img_gen_clean)
+        cfg.image_generation.models = models
+    
+    # Parse connectors
     if "connectors" in resolved:
         cn = resolved["connectors"]
         if "github" in cn:
@@ -235,10 +378,30 @@ def load_config(config_path: Optional[str] = None) -> Config:
             cfg.connectors.dropbox = DropboxConfig(**{k: v for k, v in cn["dropbox"].items() if hasattr(cfg.connectors.dropbox, k)})
         if "google_drive" in cn:
             gd = cn["google_drive"]
-            dev_scaffold = gd.pop("dev_scaffold", {})
+            dev_scaffold_data = gd.pop("dev_scaffold", {})
             cfg.connectors.google_drive = GoogleDriveConfig(**{k: v for k, v in gd.items() if hasattr(cfg.connectors.google_drive, k)})
-            if dev_scaffold:
-                cfg.connectors.google_drive.dev_scaffold = DevScaffoldConfig(**{k: v for k, v in dev_scaffold.items() if hasattr(cfg.connectors.google_drive.dev_scaffold, k)})
+            if dev_scaffold_data:
+                cfg.connectors.google_drive.dev_scaffold = DevScaffoldConfig(**{k: v for k, v in dev_scaffold_data.items() if hasattr(cfg.connectors.google_drive.dev_scaffold, k)})
+    
+    # Parse UI with nested controls
+    if "ui" in resolved:
+        ui_data = resolved["ui"]
+        
+        # Parse code_controls if present
+        code_controls = CodeControlsConfig()
+        if "code_controls" in ui_data:
+            code_controls = CodeControlsConfig(**{k: v for k, v in ui_data["code_controls"].items() if hasattr(code_controls, k)})
+        
+        # Parse image_controls if present
+        image_controls = ImageControlsConfig()
+        if "image_controls" in ui_data:
+            image_controls = ImageControlsConfig(**{k: v for k, v in ui_data["image_controls"].items() if hasattr(image_controls, k)})
+        
+        # Build UIConfig
+        ui_clean = {k: v for k, v in ui_data.items() if k not in ["code_controls", "image_controls"] and hasattr(cfg.ui, k)}
+        cfg.ui = UIConfig(**ui_clean)
+        cfg.ui.code_controls = code_controls
+        cfg.ui.image_controls = image_controls
     
     _CONFIG = cfg
     return _CONFIG
