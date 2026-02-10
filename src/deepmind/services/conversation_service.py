@@ -2,6 +2,7 @@
 Conversation Service — orchestrates chat, context, vector retrieval, and streaming.
 """
 import uuid
+import json
 from typing import AsyncGenerator, Dict, List, Optional
 from datetime import datetime, timezone
 
@@ -14,6 +15,7 @@ from deepmind.services.context_manager import get_context_manager
 from deepmind.services.deepseek_client import get_deepseek_client
 from deepmind.services.openai_client import get_openai_client
 from deepmind.services.vector_store import get_vector_store
+from deepmind.services.code_executor import get_code_executor
 
 
 SYSTEM_PROMPT = """You are DeepMind Workspace, an advanced AI assistant with persistent memory and document integration.
@@ -23,13 +25,41 @@ Key capabilities:
 - Documents from GitHub, Dropbox, and Google Drive can be referenced
 - You can search through pinned and indexed documents for relevant context
 - You provide detailed, accurate, and well-structured responses
+- You can execute Python code using the execute_python_code tool for calculations, data analysis, and demonstrations
 
 Guidelines:
 - Reference specific documents when they are relevant to the question
 - Be thorough but concise — quality over verbosity
 - When discussing code, provide complete implementations
+- Use execute_python_code when users ask for calculations, data processing, or code demonstrations
 - If you're unsure about something, say so clearly
 - Use markdown formatting for readability"""
+
+
+# DeepSeek function calling schema for code execution
+CODE_EXECUTION_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_python_code",
+            "description": "Execute Python code in a secure sandbox. Use this for calculations, data analysis, demonstrations, or when the user explicitly requests code execution. The sandbox includes standard libraries (math, statistics, collections, etc.) but no file I/O or network access.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "The Python code to execute. Should be complete, executable code. Use print() to show output."
+                    },
+                    "explanation": {
+                        "type": "string",
+                        "description": "Brief explanation of what this code does and why you're running it."
+                    }
+                },
+                "required": ["code", "explanation"]
+            }
+        }
+    }
+]
 
 
 class ConversationService:
@@ -40,6 +70,7 @@ class ConversationService:
         self.deepseek = get_deepseek_client()
         self.openai = get_openai_client()
         self.vectors = get_vector_store()
+        self.code_executor = get_code_executor()
         self.cfg = get_config()
     
     async def list_conversations(self, include_archived: bool = False) -> List[Dict]:
@@ -139,15 +170,15 @@ class ConversationService:
         model_name = ""
         
         if model == "gpt4o":
-            # Stream from OpenAI GPT-4o
+            # Stream from OpenAI GPT-4o (no tool calling yet)
             model_name = self.cfg.openai.model if hasattr(self.cfg, 'openai') else "gpt-4o"
             async for delta in self.openai.stream_chat(messages=context_messages):
                 full_response += delta
                 yield delta
         else:
-            # Stream from DeepSeek (default)
+            # DeepSeek with function calling
             model_name = self.cfg.deepseek.chat_model
-            async for delta in self.deepseek.chat_completion_stream(messages=context_messages):
+            async for delta in self._deepseek_with_tools(context_messages):
                 full_response += delta
                 yield delta
         
@@ -175,6 +206,101 @@ class ConversationService:
         
         # Check if summarization is needed
         await self.ctx.check_and_summarize(conversation_id)
+    
+    async def _deepseek_with_tools(self, messages: List[Dict]) -> AsyncGenerator[str, None]:
+        """
+        Handle DeepSeek chat with function calling for code execution.
+        Processes tool calls, executes code, and continues conversation.
+        """
+        # Make initial request with tools
+        payload = {
+            "model": self.cfg.deepseek.chat_model,
+            "messages": messages,
+            "temperature": self.cfg.deepseek.temperature,
+            "max_tokens": self.cfg.deepseek.max_tokens,
+            "top_p": self.cfg.deepseek.top_p,
+            "tools": CODE_EXECUTION_TOOLS,
+            "stream": False,  # Tool calling requires non-streaming initially
+        }
+        
+        response = await self.deepseek.client.post("/chat/completions", json=payload)
+        response.raise_for_status()
+        data = response.json()
+        
+        choice = data["choices"][0]
+        message = choice["message"]
+        
+        # Check if model wants to call a tool
+        if message.get("tool_calls"):
+            # Execute tool calls
+            tool_messages = messages.copy()
+            tool_messages.append(message)  # Add assistant's tool call request
+            
+            for tool_call in message["tool_calls"]:
+                function_name = tool_call["function"]["name"]
+                function_args = json.loads(tool_call["function"]["arguments"])
+                
+                if function_name == "execute_python_code":
+                    code = function_args.get("code", "")
+                    explanation = function_args.get("explanation", "")
+                    
+                    # Yield explanation to user
+                    yield f"\n\n🔧 **Executing code:** {explanation}\n\n"
+                    
+                    # Execute the code
+                    result = self.code_executor.execute(code)
+                    
+                    # Format execution result
+                    if result["success"]:
+                        tool_result = f"Execution successful.\n\nOutput:\n{result['stdout']}"
+                        if result.get('stderr'):
+                            tool_result += f"\n\nWarnings:\n{result['stderr']}"
+                        
+                        # Show code and output to user
+                        yield f"```python\n{code}\n```\n\n"
+                        if result['stdout']:
+                            yield f"**Output:**\n```\n{result['stdout']}\n```\n\n"
+                    else:
+                        tool_result = f"Execution failed: {result['error']}\n\nStderr:\n{result.get('stderr', '')}"
+                        yield f"❌ **Execution failed:** {result['error']}\n\n"
+                    
+                    # Add tool result to messages
+                    tool_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": tool_result,
+                    })
+            
+            # Get final response after tool execution
+            follow_up_payload = {
+                "model": self.cfg.deepseek.chat_model,
+                "messages": tool_messages,
+                "temperature": self.cfg.deepseek.temperature,
+                "max_tokens": self.cfg.deepseek.max_tokens,
+                "top_p": self.cfg.deepseek.top_p,
+                "stream": True,
+            }
+            
+            async with self.deepseek.client.stream("POST", "/chat/completions", json=follow_up_payload) as stream_response:
+                stream_response.raise_for_status()
+                async for line in stream_response.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    chunk = line[len("data: "):]
+                    if chunk == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(chunk)
+                        delta = obj.get("choices", [{}])[0].get("delta", {})
+                        content = delta.get("content", "")
+                        if content:
+                            yield content
+                    except json.JSONDecodeError:
+                        continue
+        else:
+            # No tool calls, just return the content
+            content = message.get("content", "")
+            yield content
     
     async def send_message_sync(
         self, conversation_id: str, user_content: str, model: str = "deepseek"
