@@ -5,6 +5,7 @@ Supports ${VAR:default} interpolation in YAML values.
 import os
 import re
 import yaml
+import secrets
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -328,6 +329,16 @@ def load_config(config_path: Optional[str] = None) -> Config:
     # Parse simple configs
     if "app" in resolved:
         cfg.app = AppConfig(**{k: v for k, v in resolved["app"].items() if hasattr(cfg.app, k)})
+    
+    # AUTO-GENERATE SECRET_KEY IF MISSING (ENTERPRISE FEATURE)
+    if not cfg.app.secret_key or cfg.app.secret_key.strip() == "":
+        cfg.app.secret_key = secrets.token_urlsafe(64)
+        import structlog
+        log = structlog.get_logger()
+        log.warning(
+            "secret_key_auto_generated",
+            message="APP_SECRET_KEY not set - auto-generated. Sessions will reset on restart. Set APP_SECRET_KEY env var for persistence."
+        )
     
     if "deepseek" in resolved:
         cfg.deepseek = DeepSeekConfig(**{k: v for k, v in resolved["deepseek"].items() if hasattr(cfg.deepseek, k)})
