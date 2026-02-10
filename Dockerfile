@@ -31,7 +31,7 @@ COPY scripts/ scripts/
 RUN pip install --timeout=300 -e .
 
 # Verify RestrictedPython installation (critical security dependency)
-RUN python -c "import RestrictedPython; print(RestrictedPython.__version__)"
+RUN python -c "import RestrictedPython; from RestrictedPython import compile_restricted; print('RestrictedPython OK')"
 
 # Pre-download embedding model during build (not runtime)
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')" && \
