@@ -16,6 +16,7 @@ from deepmind.services.deepseek_client import get_deepseek_client
 from deepmind.services.openai_client import get_openai_client
 from deepmind.services.vector_store import get_vector_store
 from deepmind.services.code_executor import get_code_executor
+from deepmind.services.flux_client import get_flux_client
 
 
 SYSTEM_PROMPT = """You are DeepMind Workspace, an advanced AI assistant with persistent memory and document integration.
@@ -26,18 +27,20 @@ Key capabilities:
 - You can search through pinned and indexed documents for relevant context
 - You provide detailed, accurate, and well-structured responses
 - You can execute Python code using the execute_python_code tool for calculations, data analysis, and demonstrations
+- You can generate images using the generate_image tool when users request visual content
 
 Guidelines:
 - Reference specific documents when they are relevant to the question
 - Be thorough but concise — quality over verbosity
 - When discussing code, provide complete implementations
 - Use execute_python_code when users ask for calculations, data processing, or code demonstrations
+- Use generate_image when users request images, artwork, visualizations, or describe visual scenes
 - If you're unsure about something, say so clearly
 - Use markdown formatting for readability"""
 
 
-# DeepSeek function calling schema for code execution
-CODE_EXECUTION_TOOLS = [
+# DeepSeek function calling schemas
+DEEPSEEK_TOOLS = [
     {
         "type": "function",
         "function": {
@@ -58,6 +61,32 @@ CODE_EXECUTION_TOOLS = [
                 "required": ["code", "explanation"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": "Generate an image using FLUX AI models. Use this when users request images, artwork, scenes, or visual content. Supports multiple quality levels: ultra (highest quality, 2048x2048), pro (high quality, 1440x1440, DEFAULT), dev (good quality, 1024x1024), schnell (fast preview, 1024x768).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Detailed description of the image to generate. Be specific about style, composition, lighting, colors, and subject matter."
+                    },
+                    "model": {
+                        "type": "string",
+                        "enum": ["ultra", "pro", "dev", "schnell"],
+                        "description": "Model quality level. Use 'pro' for most requests, 'ultra' for highest quality, 'dev' for standard, 'schnell' for quick previews."
+                    },
+                    "explanation": {
+                        "type": "string",
+                        "description": "Brief explanation of why you're generating this image and how it addresses the user's request."
+                    }
+                },
+                "required": ["prompt", "explanation"]
+            }
+        }
     }
 ]
 
@@ -71,6 +100,7 @@ class ConversationService:
         self.openai = get_openai_client()
         self.vectors = get_vector_store()
         self.code_executor = get_code_executor()
+        self.flux_client = get_flux_client()
         self.cfg = get_config()
     
     async def list_conversations(self, include_archived: bool = False) -> List[Dict]:
@@ -209,8 +239,8 @@ class ConversationService:
     
     async def _deepseek_with_tools(self, messages: List[Dict]) -> AsyncGenerator[str, None]:
         """
-        Handle DeepSeek chat with function calling for code execution.
-        Processes tool calls, executes code, and continues conversation.
+        Handle DeepSeek chat with function calling for code execution and image generation.
+        Processes tool calls, executes code/generates images, and continues conversation.
         """
         # Make initial request with tools
         payload = {
@@ -219,7 +249,7 @@ class ConversationService:
             "temperature": self.cfg.deepseek.temperature,
             "max_tokens": self.cfg.deepseek.max_tokens,
             "top_p": self.cfg.deepseek.top_p,
-            "tools": CODE_EXECUTION_TOOLS,
+            "tools": DEEPSEEK_TOOLS,
             "stream": False,  # Tool calling requires non-streaming initially
         }
         
@@ -263,6 +293,44 @@ class ConversationService:
                     else:
                         tool_result = f"Execution failed: {result['error']}\n\nStderr:\n{result.get('stderr', '')}"
                         yield f"❌ **Execution failed:** {result['error']}\n\n"
+                    
+                    # Add tool result to messages
+                    tool_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": tool_result,
+                    })
+                
+                elif function_name == "generate_image":
+                    prompt = function_args.get("prompt", "")
+                    model = function_args.get("model", "pro")
+                    explanation = function_args.get("explanation", "")
+                    
+                    # Yield explanation to user
+                    yield f"\n\n🎨 **Generating image:** {explanation}\n\n"
+                    yield f"**Prompt:** {prompt}\n\n"
+                    yield f"**Model:** FLUX.1-{model}\n\n"
+                    
+                    # Generate the image
+                    result = await self.flux_client.generate_image(
+                        prompt=prompt,
+                        model=model,
+                    )
+                    
+                    # Format generation result
+                    if result["success"]:
+                        tool_result = f"Image generated successfully.\n\nPrompt: {prompt}\nModel: {result['model_name']}\nDimensions: {result['width']}x{result['height']}\nPath: {result['image_path']}"
+                        
+                        # Show image to user (using base64 or file path)
+                        if result.get('image_path'):
+                            yield f"![Generated Image]({result['image_path']})\n\n"
+                        elif result.get('base64_data'):
+                            yield f"![Generated Image](data:image/png;base64,{result['base64_data']})\n\n"
+                        
+                        yield f"✅ **Image generated** ({result['width']}x{result['height']}, {result['model']})\n\n"
+                    else:
+                        tool_result = f"Image generation failed: {result['error']}"
+                        yield f"❌ **Generation failed:** {result['error']}\n\n"
                     
                     # Add tool result to messages
                     tool_messages.append({
