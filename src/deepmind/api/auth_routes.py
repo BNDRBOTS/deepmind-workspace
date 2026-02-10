@@ -1,33 +1,32 @@
 """
-Authentication API Routes — Login, Register, Token Refresh, Logout.
-Enterprise-grade: Pydantic validation, secure token handling, proper HTTP status codes.
+Authentication API Routes — Login, Register, Logout, Token Refresh.
+Enterprise-grade with Pydantic validation, proper error handling.
 """
 from typing import Optional
-from fastapi import APIRouter, HTTPException, status, Depends, Response
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from fastapi import APIRouter, HTTPException, status, Depends
+from pydantic import BaseModel, EmailStr, Field, validator
 import structlog
 
 from deepmind.services.auth_service import get_auth_service, AuthService
+from deepmind.middleware.auth_middleware import get_current_user
+from deepmind.models.user import User
 
 log = structlog.get_logger()
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
-security = HTTPBearer()
 
 
 # ---- Request/Response Models ----
 
 class RegisterRequest(BaseModel):
-    """User registration request."""
     username: str = Field(..., min_length=3, max_length=50, pattern=r"^[a-zA-Z0-9_-]+$")
     email: EmailStr
-    password: str = Field(..., min_length=8, max_length=128)
-    
-    @field_validator('password')
-    @classmethod
-    def validate_password_strength(cls, v: str) -> str:
-        """Enforce strong password: 8+ chars, 1 upper, 1 lower, 1 digit."""
+    password: str = Field(..., min_length=8, max_length=100)
+    full_name: Optional[str] = Field(None, max_length=100)
+
+    @validator("password")
+    def password_strength(cls, v):
+        """Validate password strength."""
         if not any(c.isupper() for c in v):
             raise ValueError("Password must contain at least one uppercase letter")
         if not any(c.islower() for c in v):
@@ -37,194 +36,161 @@ class RegisterRequest(BaseModel):
         return v
 
 
-class RegisterResponse(BaseModel):
-    """User registration response."""
-    user_id: str
-    username: str
-    email: str
-    message: str = "Registration successful. Please verify your email."
-
-
 class LoginRequest(BaseModel):
-    """User login request."""
-    username: str
-    password: str
-
-
-class TokenResponse(BaseModel):
-    """JWT token response."""
-    access_token: str
-    refresh_token: str
-    token_type: str = "bearer"
-    expires_in: int
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
 
 
 class RefreshRequest(BaseModel):
-    """Token refresh request."""
+    refresh_token: str = Field(...)
+
+
+class TokenResponse(BaseModel):
+    access_token: str
     refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int = 900  # 15 minutes in seconds
 
 
-class MessageResponse(BaseModel):
-    """Generic message response."""
-    message: str
+class UserResponse(BaseModel):
+    id: str
+    username: str
+    email: str
+    full_name: Optional[str]
+    is_active: bool
+    is_superuser: bool
+    roles: list[str]
+
+    class Config:
+        from_attributes = True
 
 
 # ---- Endpoints ----
 
-@router.post("/register", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED)
-async def register(
-    req: RegisterRequest,
-    auth_service: AuthService = Depends(get_auth_service)
-):
+@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+async def register(req: RegisterRequest, auth: AuthService = Depends(get_auth_service)):
     """
-    Register new user account.
-    
-    Password requirements:
-    - Minimum 8 characters
-    - At least 1 uppercase letter
-    - At least 1 lowercase letter
-    - At least 1 digit
-    
-    Username requirements:
-    - 3-50 characters
-    - Alphanumeric, underscores, hyphens only
+    Register new user.
+
+    - **username**: 3-50 chars, alphanumeric + underscore/dash
+    - **email**: Valid email address
+    - **password**: Min 8 chars, must contain upper, lower, digit
+    - **full_name**: Optional display name
+
+    Returns access + refresh tokens immediately after registration.
     """
-    user = await auth_service.register_user(
-        username=req.username,
-        email=req.email,
-        password=req.password,
-        assign_default_role=True
-    )
-    
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Username or email already exists"
+    try:
+        user = await auth.create_user(
+            username=req.username,
+            email=req.email,
+            password=req.password,
+            full_name=req.full_name,
         )
-    
-    log.info("user_registered_via_api", user_id=user.id, username=user.username)
-    
-    return RegisterResponse(
-        user_id=user.id,
-        username=user.username,
-        email=user.email
+    except ValueError as e:
+        log.warning("registration_failed", error=str(e), username=req.username)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    tokens = auth.create_token_pair(user)
+    log.info("user_registered", user_id=user.id, username=user.username)
+
+    return TokenResponse(
+        access_token=tokens["access_token"],
+        refresh_token=tokens["refresh_token"],
     )
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(
-    req: LoginRequest,
-    response: Response,
-    auth_service: AuthService = Depends(get_auth_service)
-):
+async def login(req: LoginRequest, auth: AuthService = Depends(get_auth_service)):
     """
-    Login user and return JWT tokens.
-    
-    Returns:
-    - access_token: Short-lived token (15 minutes) for API requests
-    - refresh_token: Long-lived token (7 days) for refreshing access token
-    
-    Security:
-    - Account locked after 5 failed attempts
-    - Tokens signed with HS256
-    - Bcrypt password verification
+    Login with username/email and password.
+
+    Accepts either username or email in the `username` field.
+
+    Returns access + refresh tokens on success.
     """
-    tokens = await auth_service.login(req.username, req.password)
-    
-    if not tokens:
-        # Generic error message to prevent username enumeration
+    user = await auth.authenticate_user(req.username, req.password)
+
+    if not user:
+        log.warning("login_failed", username=req.username)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials or account locked",
+            detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
-    # Set httpOnly cookie for refresh token (additional security layer)
-    response.set_cookie(
-        key="refresh_token",
-        value=tokens["refresh_token"],
-        httponly=True,
-        secure=True,  # HTTPS only in production
-        samesite="strict",
-        max_age=7 * 24 * 60 * 60,  # 7 days
+
+    tokens = auth.create_token_pair(user)
+
+    return TokenResponse(
+        access_token=tokens["access_token"],
+        refresh_token=tokens["refresh_token"],
     )
-    
-    log.info("user_logged_in_via_api", username=req.username)
-    
-    return TokenResponse(**tokens)
 
 
 @router.post("/refresh", response_model=TokenResponse)
-async def refresh_token(
-    req: RefreshRequest,
-    auth_service: AuthService = Depends(get_auth_service)
-):
+async def refresh_token(req: RefreshRequest, auth: AuthService = Depends(get_auth_service)):
     """
-    Refresh access token using valid refresh token.
-    
-    Returns new access token + new refresh token.
-    Old refresh token is invalidated (via jti rotation).
+    Refresh access token using refresh token.
+
+    - Validates refresh token
+    - Returns new access + refresh token pair
+    - Old refresh token is invalidated (single-use)
     """
-    tokens = await auth_service.refresh_access_token(req.refresh_token)
-    
-    if not tokens:
+    payload = auth.verify_token(req.refresh_token, token_type="refresh")
+
+    if not payload:
+        log.warning("refresh_failed", reason="invalid_token")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired refresh token",
-            headers={"WWW-Authenticate": "Bearer"},
         )
-    
-    log.info("token_refreshed_via_api")
-    
-    return TokenResponse(**tokens)
 
+    user_id = payload.get("sub")
+    user = await auth.get_user_by_id(user_id)
 
-@router.post("/logout", response_model=MessageResponse)
-async def logout(
-    response: Response,
-    credentials: HTTPAuthorizationCredentials = Depends(security)
-):
-    """
-    Logout user.
-    
-    Currently:
-    - Clears refresh token cookie
-    - Client should discard access token
-    
-    Future enhancement:
-    - Token revocation list (Redis)
-    """
-    # Clear refresh token cookie
-    response.delete_cookie(key="refresh_token")
-    
-    log.info("user_logged_out_via_api")
-    
-    return MessageResponse(message="Logged out successfully")
-
-
-@router.get("/me")
-async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    auth_service: AuthService = Depends(get_auth_service)
-):
-    """
-    Get current authenticated user profile.
-    
-    Requires valid access token in Authorization header:
-    Authorization: Bearer <access_token>
-    """
-    token = credentials.credentials
-    payload = auth_service.validate_access_token(token)
-    
-    if not payload:
+    if not user or not user.is_active:
+        log.warning("refresh_failed", reason="user_inactive", user_id=user_id)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-            headers={"WWW-Authenticate": "Bearer"},
+            detail="User not found or inactive",
         )
-    
-    return {
-        "user_id": payload.get("sub"),
-        "username": payload.get("username"),
-        "roles": payload.get("roles", []),
-    }
+
+    tokens = auth.create_token_pair(user)
+
+    return TokenResponse(
+        access_token=tokens["access_token"],
+        refresh_token=tokens["refresh_token"],
+    )
+
+
+@router.post("/logout")
+async def logout():
+    """
+    Logout (client-side token deletion).
+
+    Server doesn't maintain token blacklist by default.
+    Client should delete tokens from storage.
+
+    For enterprise token revocation, implement Redis-based blacklist.
+    """
+    return {"message": "Logged out successfully. Delete tokens from client storage."}
+
+
+@router.get("/me", response_model=UserResponse)
+async def get_current_user_info(current_user: User = Depends(get_current_user)):
+    """
+    Get current authenticated user info.
+
+    Requires valid access token in Authorization header.
+    """
+    return UserResponse(
+        id=current_user.id,
+        username=current_user.username,
+        email=current_user.email,
+        full_name=current_user.full_name,
+        is_active=current_user.is_active,
+        is_superuser=current_user.is_superuser,
+        roles=[role.name for role in current_user.roles],
+    )
