@@ -37,6 +37,63 @@ openai:
   retry_attempts: 3
   retry_backoff: 2.0
 
+code_execution:
+  enabled: true
+  timeout_seconds: 300  # 5 minutes - fully configurable via UI
+  max_output_bytes: 10485760  # 10MB - fully configurable
+  max_recursion_depth: 1000
+  allow_network: false  # Security: no external requests from code
+  restricted_python: true  # AST-level sandboxing
+
+image_generation:
+  enabled: true
+  provider: "together"  # Together AI for FLUX models
+  api_key: "${TOGETHER_API_KEY}"
+  base_url: "${TOGETHER_BASE_URL:https://api.together.xyz/v1}"
+  
+  # Model selection (priority order)
+  models:
+    ultra:  # Highest quality, unfiltered
+      name: "black-forest-labs/FLUX.1-pro-ultra"
+      max_width: 2048
+      max_height: 2048
+      steps: 50
+      cost_per_image: 0.04
+      unfiltered: true
+    
+    pro:  # High quality, unfiltered  
+      name: "black-forest-labs/FLUX.1-pro"
+      max_width: 1440
+      max_height: 1440
+      steps: 25
+      cost_per_image: 0.02
+      unfiltered: true
+    
+    dev:  # Good quality, fast
+      name: "black-forest-labs/FLUX.1-dev"
+      max_width: 1024
+      max_height: 1024
+      steps: 20
+      cost_per_image: 0.01
+      unfiltered: true
+    
+    schnell:  # Fast preview
+      name: "black-forest-labs/FLUX.1-schnell"
+      max_width: 1024
+      max_height: 768
+      steps: 4
+      cost_per_image: 0.005
+      unfiltered: false
+  
+  default_model: "pro"  # Balance of quality/speed/cost
+  default_width: 1024
+  default_height: 1024
+  timeout_seconds: 180
+  retry_attempts: 2
+  save_to_disk: true
+  output_dir: "/data/generated_images"
+  inline_display: true  # ChatGPT-style inline rendering
+
 database:
   sqlite_path: "${SQLITE_DB_PATH:./data/conversations.db}"
   chromadb_path: "${CHROMADB_PATH:./data/chromadb}"
@@ -125,3 +182,23 @@ ui:
   animations: true
   font_family: "Inter, system-ui, -apple-system, sans-serif"
   code_font: "JetBrains Mono, Fira Code, monospace"
+  
+  # Tool controls (smooth sliders/toggles)
+  code_controls:
+    show_timeout_slider: true
+    show_output_limit_slider: true
+    timeout_min: 10
+    timeout_max: 600  # 10 minutes max
+    output_limit_presets: ["1MB", "10MB", "50MB", "100MB"]
+  
+  image_controls:
+    show_model_selector: true
+    show_size_presets: true
+    show_quality_slider: true
+    size_presets:
+      - "512x512"
+      - "768x768"
+      - "1024x1024"
+      - "1024x1536 (Portrait)"
+      - "1536x1024 (Landscape)"
+      - "2048x2048 (Ultra)"
