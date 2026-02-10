@@ -1,6 +1,6 @@
 """
 Main NiceGUI page — Pro-grade ChatGPT/Perplexity-like interface.
-Features: Streaming indicators, markdown rendering, smooth animations, loading states.
+Features: Streaming indicators, markdown rendering, smooth animations, loading states, model selection.
 """
 import asyncio
 import markdown
@@ -39,6 +39,7 @@ class WorkspaceUI:
         self.send_button = None
         self.stop_button = None
         self.typing_indicator = None
+        self.model_select = None
         
         # Markdown renderer
         self.md = markdown.Markdown(extensions=['fenced_code', 'codehilite', 'tables', 'nl2br'])
@@ -176,6 +177,18 @@ class WorkspaceUI:
                 # Pinned docs row
                 self.pins_row = ui.row().classes("w-full gap-2 mb-2").style("min-height: 0;")
                 
+                # Model selector row
+                with ui.row().classes("w-full items-center gap-2 mb-2"):
+                    ui.label("Model:").classes("text-sm").style(f"color: {theme['text_secondary']}; font-weight: 500;")
+                    self.model_select = ui.select(
+                        options=[
+                            {"label": "DeepSeek Chat", "value": "deepseek"},
+                            {"label": "GPT-4o", "value": "gpt4o"}
+                        ],
+                        value="deepseek"
+                    ).classes("w-40").props("dense outlined").style(f"border-radius: 8px;")
+                    ui.label("Switch between DeepSeek and GPT-4o").classes("token-counter")
+                
                 # Input + send
                 with ui.row().classes("w-full items-end gap-2"):
                     self.input_area = ui.textarea(
@@ -205,7 +218,7 @@ class WorkspaceUI:
                 # Token usage footer
                 with ui.row().classes("w-full justify-between mt-1"):
                     self.token_footer = ui.label("").classes("token-counter")
-                    ui.label("DeepMind Workspace v1.0 · DeepSeek").classes("token-counter")
+                    ui.label("DeepMind Workspace v1.0").classes("token-counter")
     
     # ---- Data Operations ----
     
@@ -256,7 +269,7 @@ class WorkspaceUI:
             return
         
         svc = get_conversation_service()
-        self.messages = await svc.get_messages(self.active_conversation_id)
+        self.messages = await svc.get_conversation_messages(self.active_conversation_id)
         
         self.message_container.clear()
         theme = get_theme(self.theme_mode)
@@ -294,9 +307,12 @@ class WorkspaceUI:
                         html_content = self.md.convert(msg["content"])
                         ui.html(html_content).classes("markdown-content")
                     
-                    # Timestamp
-                    if msg.get("created_at"):
-                        ui.label(self._format_time(msg["created_at"])).classes("token-counter mt-1")
+                    # Timestamp + Model indicator
+                    with ui.row().classes("items-center gap-2 mt-1"):
+                        if msg.get("created_at"):
+                            ui.label(self._format_time(msg["created_at"])).classes("token-counter")
+                        if not is_user and msg.get("model_used"):
+                            ui.label(f"· {msg['model_used']}").classes("token-counter")
     
     async def _send_message(self):
         """Send user message and stream AI response."""
@@ -306,6 +322,9 @@ class WorkspaceUI:
         user_text = self.input_area.value.strip()
         self.input_area.value = ""
         self.is_streaming = True
+        
+        # Get selected model
+        selected_model = self.model_select.value if self.model_select else "deepseek"
         
         # Toggle buttons
         self.send_button.style("display: none;")
@@ -349,8 +368,8 @@ class WorkspaceUI:
                             )
                             self.current_stream_message = ui.html("").classes("markdown-content")
             
-            # Stream tokens
-            async for chunk in svc.send_message_stream(self.active_conversation_id, user_text):
+            # Stream tokens from selected model
+            async for chunk in svc.send_message(self.active_conversation_id, user_text, model=selected_model):
                 if not self.is_streaming:  # Check for stop signal
                     break
                 full_response += chunk
