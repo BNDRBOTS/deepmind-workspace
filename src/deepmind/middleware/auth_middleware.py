@@ -1,172 +1,202 @@
 """
-Authentication Middleware — FastAPI dependency for JWT validation.
-Enterprise-grade: Token validation, role/permission checks, dependency injection.
+Authentication Middleware — FastAPI dependency for JWT validation on protected routes.
+Enterprise-grade with proper error handling, role-based access control.
 """
-from typing import Optional, List
+from typing import Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
 
+from deepmind.services.auth_service import get_auth_service, AuthService
 from deepmind.models.user import User
-from deepmind.services.auth_service import AuthService, get_auth_service
-from deepmind.services.database import get_session
 
 log = structlog.get_logger()
 
-security = HTTPBearer()
+# HTTP Bearer token extractor
+security = HTTPBearer(auto_error=False)
 
-
-# ---- Core Authentication Dependency ----
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    session: AsyncSession = Depends(get_session),
-    auth_service: AuthService = Depends(get_auth_service)
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    auth: AuthService = Depends(get_auth_service),
 ) -> User:
     """
-    Get current authenticated user from JWT token.
-    
-    Usage in route:
+    FastAPI dependency to get current authenticated user from JWT token.
+
+    Usage:
         @router.get("/protected")
         async def protected_route(user: User = Depends(get_current_user)):
             return {"user_id": user.id}
-    
+
     Raises:
-        HTTPException 401 if token invalid/expired
-        HTTPException 403 if user inactive/locked
+        HTTPException 401: If token is missing, invalid, or expired
     """
+    if not credentials:
+        log.warning("auth_failed", reason="no_credentials")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     token = credentials.credentials
-    
-    # Validate token
-    payload = auth_service.validate_access_token(token)
+    payload = auth.verify_token(token, token_type="access")
+
     if not payload:
+        log.warning("auth_failed", reason="invalid_token")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token payload",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    # Fetch user from database
-    stmt = select(User).where(User.id == user_id)
-    result = await session.execute(stmt)
-    user = result.scalar_one_or_none()
-    
+    user = await auth.get_user_by_id(user_id)
+
     if not user:
+        log.warning("auth_failed", reason="user_not_found", user_id=user_id)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found",
-            headers={"WWW-Authenticate": "Bearer"},
         )
-    
-    # Check account status
+
     if not user.is_active:
+        log.warning("auth_failed", reason="user_inactive", user_id=user_id)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is inactive"
+            detail="User account is inactive",
         )
-    
-    if user.is_locked:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is locked"
-        )
-    
-    # Load roles for permission checks
-    await session.refresh(user, ["roles"])
-    
+
     return user
 
 
-# ---- Optional Authentication (for public routes with optional user context) ----
+async def get_current_active_user(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """
+    Dependency to require active user (alias for get_current_user for clarity).
+    """
+    return current_user
 
+
+async def require_superuser(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """
+    Dependency to require superuser privileges.
+
+    Usage:
+        @router.delete("/admin/users/{user_id}")
+        async def delete_user(user_id: str, admin: User = Depends(require_superuser)):
+            ...
+
+    Raises:
+        HTTPException 403: If user is not superuser
+    """
+    if not current_user.is_superuser:
+        log.warning(
+            "authorization_failed",
+            reason="not_superuser",
+            user_id=current_user.id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Superuser privileges required",
+        )
+    return current_user
+
+
+def require_role(role_name: str):
+    """
+    Dependency factory to require specific role.
+
+    Usage:
+        @router.post("/admin/backup")
+        async def backup_database(user: User = Depends(require_role("admin"))):
+            ...
+
+    Args:
+        role_name: Required role name
+
+    Returns:
+        FastAPI dependency function
+    """
+
+    async def role_checker(current_user: User = Depends(get_current_user)) -> User:
+        if not current_user.has_role(role_name):
+            log.warning(
+                "authorization_failed",
+                reason="missing_role",
+                required_role=role_name,
+                user_id=current_user.id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Role '{role_name}' required",
+            )
+        return current_user
+
+    return role_checker
+
+
+def require_permission(permission: str):
+    """
+    Dependency factory to require specific permission.
+
+    Usage:
+        @router.post("/api/execute-code")
+        async def execute_code(user: User = Depends(require_permission("code:execute"))):
+            ...
+
+    Args:
+        permission: Required permission string
+
+    Returns:
+        FastAPI dependency function
+    """
+
+    async def permission_checker(current_user: User = Depends(get_current_user)) -> User:
+        if not current_user.has_permission(permission) and not current_user.is_superuser:
+            log.warning(
+                "authorization_failed",
+                reason="missing_permission",
+                required_permission=permission,
+                user_id=current_user.id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Permission '{permission}' required",
+            )
+        return current_user
+
+    return permission_checker
+
+
+# Optional authentication (returns None if no token)
 async def get_current_user_optional(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
-    session: AsyncSession = Depends(get_session),
-    auth_service: AuthService = Depends(get_auth_service)
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    auth: AuthService = Depends(get_auth_service),
 ) -> Optional[User]:
     """
-    Get current user if token provided, otherwise None.
-    
-    Usage for routes that behave differently based on auth state:
-        @router.get("/optional-auth")
-        async def optional_route(user: Optional[User] = Depends(get_current_user_optional)):
+    Optional authentication - returns User if valid token present, None otherwise.
+
+    Usage:
+        @router.get("/public-or-private")
+        async def mixed_route(user: Optional[User] = Depends(get_current_user_optional)):
             if user:
                 return {"message": f"Hello {user.username}"}
-            return {"message": "Hello guest"}
+            return {"message": "Hello anonymous"}
     """
     if not credentials:
         return None
-    
-    try:
-        return await get_current_user(credentials, session, auth_service)
-    except HTTPException:
+
+    token = credentials.credentials
+    payload = auth.verify_token(token, token_type="access")
+
+    if not payload:
         return None
 
+    user_id = payload.get("sub")
+    user = await auth.get_user_by_id(user_id)
 
-# ---- Role-Based Access Control ----
-
-class RequireRole:
-    """
-    Dependency for requiring specific role(s).
-    
-    Usage:
-        @router.delete("/admin/users/{user_id}")
-        async def delete_user(
-            user_id: str,
-            current_user: User = Depends(RequireRole(["admin"]))
-        ):
-            # Only admins can access
-            pass
-    """
-    def __init__(self, roles: List[str]):
-        self.roles = roles
-    
-    async def __call__(self, user: User = Depends(get_current_user)) -> User:
-        if not any(user.has_role(role) for role in self.roles):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Requires one of roles: {', '.join(self.roles)}"
-            )
-        return user
-
-
-class RequirePermission:
-    """
-    Dependency for requiring specific permission(s).
-    
-    Usage:
-        @router.post("/execute-code")
-        async def execute(
-            code: str,
-            current_user: User = Depends(RequirePermission("execute_code"))
-        ):
-            # Only users with execute_code permission
-            pass
-    """
-    def __init__(self, permission: str):
-        self.permission = permission
-    
-    async def __call__(self, user: User = Depends(get_current_user)) -> User:
-        if not user.has_permission(self.permission):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Requires permission: {self.permission}"
-            )
-        return user
-
-
-# ---- Convenience Dependencies ----
-
-RequireAdmin = RequireRole(["admin"])
-RequireCodeExecution = RequirePermission("execute_code")
-RequireImageGeneration = RequirePermission("generate_images")
+    return user if user and user.is_active else None
