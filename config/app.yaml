@@ -1,115 +1,59 @@
 # ============================================================================
 # DeepMind Workspace — Application Configuration
-# Edit this file to change behavior without code changes
 # ============================================================================
 
 app:
-  name: "DeepMind Workspace"
-  version: "1.0.0"
-  host: "${APP_HOST:0.0.0.0}"
-  port: ${APP_PORT:8080}
-  secret_key: "${APP_SECRET_KEY}"
-  env: "${APP_ENV:production}"
-  log_level: "${APP_LOG_LEVEL:INFO}"
+  version: 1.0.0
+  log_level: INFO
 
 deepseek:
-  api_key: "${DEEPSEEK_API_KEY}"
-  base_url: "${DEEPSEEK_BASE_URL:https://api.deepseek.com/v1}"
-  chat_model: "${DEEPSEEK_MODEL:deepseek-chat}"
-  reasoning_model: "${DEEPSEEK_REASONING_MODEL:deepseek-reasoner}"
-  max_tokens: 8192
+  chat_model: deepseek-chat
+  reasoning_model: deepseek-reasoner
   temperature: 0.7
-  top_p: 0.95
-  stream: true
-  timeout_seconds: 120
-  retry_attempts: 3
-  retry_backoff: 2.0
+  max_tokens: 8192
 
-database:
-  sqlite_path: "${SQLITE_DB_PATH:./data/conversations.db}"
-  chromadb_path: "${CHROMADB_PATH:./data/chromadb}"
-  wal_mode: true
-  busy_timeout_ms: 10000
-
-context:
-  max_tokens: ${MAX_CONTEXT_TOKENS:128000}
-  summary_trigger_tokens: ${SUMMARY_TRIGGER_TOKENS:96000}
-  recent_messages_keep: ${RECENT_MESSAGES_KEEP:20}
-  summarization_model: "${DEEPSEEK_MODEL:deepseek-chat}"
-  summarization_max_tokens: 2048
-  overlap_messages: 3
+openai:
+  model: gpt-4o
+  temperature: 0.7
+  max_tokens: 4096
 
 embeddings:
-  model: "${EMBEDDING_MODEL:all-MiniLM-L6-v2}"
-  dimension: ${EMBEDDING_DIMENSION:384}
-  chunk_size: 1000
-  chunk_overlap: 200
-  batch_size: 64
-  relevance_threshold: 0.35
-  max_results: 8
+  model: all-MiniLM-L6-v2
+  dimension: 384
+  max_results: 10
+  chunk_size: 512
+  chunk_overlap: 50
+
+context:
+  max_tokens: 128000
+  summary_trigger: 96000
+  recent_keep: 30
+  summarization_enabled: true
+
+ui:
+  theme: dark
+  sidebar_width: 320
+  message_streaming: true
+  show_token_count: true
+  show_context_visualizer: true
+  default_model: deepseek
 
 connectors:
   github:
     enabled: true
-    token: "${GITHUB_TOKEN}"
-    default_org: "${GITHUB_DEFAULT_ORG:}"
-    sync_interval_minutes: 30
-    file_extensions:
-      - ".py"
-      - ".js"
-      - ".ts"
-      - ".tsx"
-      - ".java"
-      - ".go"
-      - ".rs"
-      - ".md"
-      - ".yaml"
-      - ".yml"
-      - ".json"
-      - ".toml"
-      - ".sql"
-      - ".sh"
-      - ".dockerfile"
-    max_file_size_kb: 500
-
+    auto_sync: false
+    cache_ttl: 3600
   dropbox:
-    enabled: false
-    app_key: "${DROPBOX_APP_KEY:}"
-    app_secret: "${DROPBOX_APP_SECRET:}"
-    refresh_token: "${DROPBOX_REFRESH_TOKEN:}"
-    sync_folder: "/DeepMindWorkspace"
-    sync_interval_minutes: 15
-
+    enabled: true
+    auto_sync: false
+    cache_ttl: 3600
   google_drive:
-    enabled: false
-    client_id: "${GOOGLE_CLIENT_ID:}"
-    client_secret: "${GOOGLE_CLIENT_SECRET:}"
-    redirect_uri: "${GOOGLE_REDIRECT_URI:http://localhost:8080/api/connectors/google/callback}"
-    scopes:
-      - "https://www.googleapis.com/auth/drive.readonly"
-      - "https://www.googleapis.com/auth/drive.metadata.readonly"
-    sync_interval_minutes: 15
-    dev_scaffold:
-      enabled: true
-      search_triggers:
-        - "how to implement"
-        - "documentation for"
-        - "code example"
-        - "framework reference"
-        - "architecture pattern"
-      file_types:
-        - "application/pdf"
-        - "text/plain"
-        - "text/markdown"
-        - "application/vnd.google-apps.document"
+    enabled: true
+    auto_sync: false
+    cache_ttl: 3600
 
-ui:
-  theme: "dark"
-  title: "DeepMind Workspace"
-  sidebar_width: 340
-  message_max_display: 200
-  token_warning_percent: 80
-  token_critical_percent: 95
-  animations: true
-  font_family: "Inter, system-ui, -apple-system, sans-serif"
-  code_font: "JetBrains Mono, Fira Code, monospace"
+performance:
+  vector_search_timeout: 10.0
+  llm_request_timeout: 180.0
+  max_concurrent_requests: 5
+  enable_caching: true
