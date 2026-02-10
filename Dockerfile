@@ -40,8 +40,9 @@ COPY . .
 # Make scripts executable
 RUN chmod +x scripts/*.sh || true
 
-# Create data directory (will be mounted by Render Disk)
+# Create data directories (will be mounted by Render Disk)
 RUN mkdir -p /data && chmod 777 /data
+RUN mkdir -p /data/generated_images && chmod 777 /data/generated_images
 
 EXPOSE 8080
 
