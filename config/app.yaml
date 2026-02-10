@@ -25,6 +25,18 @@ deepseek:
   retry_attempts: 3
   retry_backoff: 2.0
 
+openai:
+  api_key: "${OPENAI_API_KEY}"
+  base_url: "${OPENAI_BASE_URL:https://api.openai.com/v1}"
+  model: "${OPENAI_MODEL:gpt-4o}"
+  max_tokens: 4096
+  temperature: 0.7
+  top_p: 0.95
+  stream: true
+  timeout_seconds: 120
+  retry_attempts: 3
+  retry_backoff: 2.0
+
 database:
   sqlite_path: "${SQLITE_DB_PATH:./data/conversations.db}"
   chromadb_path: "${CHROMADB_PATH:./data/chromadb}"
