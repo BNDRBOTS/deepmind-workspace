@@ -1,6 +1,7 @@
 """
 Enterprise-grade Python code execution using RestrictedPython.
 Provides AST-level sandboxing with compile-time security enforcement.
+Fully configurable via app.yaml - no arbitrary limits.
 """
 import sys
 import io
@@ -13,6 +14,8 @@ import structlog
 from RestrictedPython import compile_restricted, safe_globals, limited_builtins
 from RestrictedPython.Guards import guarded_iter_unpack_sequence, safe_builtins
 from RestrictedPython.Eval import default_guarded_getattr, default_guarded_getitem
+
+from deepmind.config import get_config
 
 log = structlog.get_logger()
 
@@ -36,21 +39,37 @@ class CodeExecutor:
     - Restricted builtins (no open, import, eval, exec)
     - Safe attribute/item access with guards
     - Timeout enforcement via signals
-    - Memory/recursion limits
+    - Configurable memory/output limits
     - Output capture with size limits
+    
+    All limits configurable via config/app.yaml
     """
     
-    def __init__(self, timeout: int = 30, max_output_size: int = 50000):
+    def __init__(self, timeout: Optional[int] = None, max_output_size: Optional[int] = None):
         """
         Args:
-            timeout: Maximum execution time in seconds
-            max_output_size: Maximum captured output in characters
+            timeout: Override config timeout (seconds)
+            max_output_size: Override config max output (bytes)
         """
-        self.timeout = timeout
-        self.max_output_size = max_output_size
+        cfg = get_config()
+        
+        # Read from config, allow runtime override
+        self.timeout = timeout or cfg.code_execution.timeout_seconds
+        self.max_output_size = max_output_size or cfg.code_execution.max_output_bytes
+        self.max_recursion_depth = cfg.code_execution.max_recursion_depth
+        
+        # Set Python recursion limit
+        sys.setrecursionlimit(self.max_recursion_depth)
         
         # Build safe globals with essential builtins only
         self.safe_globals = self._build_safe_globals()
+        
+        log.info(
+            "code_executor_initialized",
+            timeout=self.timeout,
+            max_output_mb=self.max_output_size / 1048576,
+            max_recursion=self.max_recursion_depth,
+        )
     
     def _build_safe_globals(self) -> Dict[str, Any]:
         """
@@ -136,12 +155,13 @@ class CodeExecutor:
         
         return restricted_builtins
     
-    def execute(self, code: str) -> Dict[str, Any]:
+    def execute(self, code: str, timeout_override: Optional[int] = None) -> Dict[str, Any]:
         """
         Execute Python code in RestrictedPython sandbox.
         
         Args:
             code: Python code string to execute
+            timeout_override: Override timeout for this execution
             
         Returns:
             Dict containing:
@@ -154,6 +174,8 @@ class CodeExecutor:
         """
         stdout_capture = io.StringIO()
         stderr_capture = io.StringIO()
+        
+        timeout = timeout_override or self.timeout
         
         try:
             # Compile with RestrictedPython (AST transformation)
@@ -184,7 +206,7 @@ class CodeExecutor:
             # Set execution timeout (Unix only)
             if hasattr(signal, 'SIGALRM'):
                 signal.signal(signal.SIGALRM, _timeout_handler)
-                signal.alarm(self.timeout)
+                signal.alarm(timeout)
             
             # Execute with captured output
             exec_globals = self.safe_globals.copy()
@@ -201,6 +223,11 @@ class CodeExecutor:
             # Capture output with size limits
             stdout_text = stdout_capture.getvalue()[:self.max_output_size]
             stderr_text = stderr_capture.getvalue()[:self.max_output_size]
+            
+            # Check if output was truncated
+            stdout_full = stdout_capture.getvalue()
+            if len(stdout_full) > self.max_output_size:
+                stdout_text += f"\n\n[OUTPUT TRUNCATED: {len(stdout_full) - self.max_output_size} bytes omitted]"
             
             # Extract result if last statement was expression
             result_value = exec_globals.get('_', None)
@@ -224,13 +251,13 @@ class CodeExecutor:
             if hasattr(signal, 'SIGALRM'):
                 signal.alarm(0)
             
-            log.warning("code_execution_timeout", timeout=self.timeout)
+            log.warning("code_execution_timeout", timeout=timeout)
             return {
                 "success": False,
                 "stdout": stdout_capture.getvalue()[:self.max_output_size],
                 "stderr": "",
-                "error": f"Execution timed out after {self.timeout} seconds",
-                "execution_time": self.timeout,
+                "error": f"Execution timed out after {timeout} seconds",
+                "execution_time": timeout,
             }
         
         except Exception as e:
@@ -296,5 +323,5 @@ def get_code_executor() -> CodeExecutor:
     """Get singleton RestrictedPython code executor instance."""
     global _executor
     if _executor is None:
-        _executor = CodeExecutor(timeout=30, max_output_size=50000)
+        _executor = CodeExecutor()
     return _executor
