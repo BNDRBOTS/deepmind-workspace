@@ -11,6 +11,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 import structlog
 
 from deepmind.config import get_config
+from deepmind.services.secrets_manager import get_secrets_manager
 
 log = structlog.get_logger()
 
@@ -25,10 +26,11 @@ class DeepSeekClient:
     @property
     def client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
+            api_key = get_secrets_manager().get("DEEPSEEK_API_KEY", self.cfg.api_key)
             self._client = httpx.AsyncClient(
                 base_url=self.cfg.base_url,
                 headers={
-                    "Authorization": f"Bearer {self.cfg.api_key}",
+                    "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
                 timeout=httpx.Timeout(self.cfg.timeout_seconds, connect=10.0),
