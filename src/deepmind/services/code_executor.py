@@ -16,6 +16,7 @@ from RestrictedPython.Guards import guarded_iter_unpack_sequence, safe_builtins
 from RestrictedPython.Eval import default_guarded_getattr, default_guarded_getitem
 
 from deepmind.config import get_config
+from deepmind.services.network_blocker import NetworkBlocker
 
 log = structlog.get_logger()
 
@@ -39,6 +40,7 @@ class CodeExecutor:
     - Restricted builtins (no open, import, eval, exec)
     - Safe attribute/item access with guards
     - Timeout enforcement via signals
+    - Network isolation via NetworkBlocker (socket, urllib, httpx, requests)
     - Configurable memory/output limits
     - Output capture with size limits
     
@@ -69,6 +71,7 @@ class CodeExecutor:
             timeout=self.timeout,
             max_output_mb=self.max_output_size / 1048576,
             max_recursion=self.max_recursion_depth,
+            network_isolated=True,
         )
     
     def _build_safe_globals(self) -> Dict[str, Any]:
@@ -86,6 +89,7 @@ class CodeExecutor:
         - File I/O: open, file
         - Code execution: eval, exec, compile, __import__
         - System access: os, sys, subprocess
+        - Network: socket, urllib, httpx, requests (blocked by NetworkBlocker)
         - Introspection: globals, locals, vars, dir (restricted)
         """
         restricted_builtins = {
@@ -157,7 +161,7 @@ class CodeExecutor:
     
     def execute(self, code: str, timeout_override: Optional[int] = None) -> Dict[str, Any]:
         """
-        Execute Python code in RestrictedPython sandbox.
+        Execute Python code in RestrictedPython sandbox with network isolation.
         
         Args:
             code: Python code string to execute
@@ -208,10 +212,10 @@ class CodeExecutor:
                 signal.signal(signal.SIGALRM, _timeout_handler)
                 signal.alarm(timeout)
             
-            # Execute with captured output
+            # Execute with captured output AND network isolation
             exec_globals = self.safe_globals.copy()
             
-            with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+            with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture), NetworkBlocker():
                 exec(byte_code.code, exec_globals)
             
             # Cancel timeout
