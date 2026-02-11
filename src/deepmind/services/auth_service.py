@@ -1,1 +1,265 @@
-"""\nAuthentication Service — JWT generation, validation, password verification, token refresh.\nEnterprise-grade security with proper expiration, refresh tokens, and secure secret handling.\n"""\nimport os\nimport uuid\nfrom datetime import datetime, timedelta, timezone\nfrom typing import Optional, Dict, Any\nimport structlog\n\nfrom jose import JWTError, jwt\nfrom sqlalchemy import select\nfrom sqlalchemy.orm import selectinload\n\nfrom deepmind.config import get_config\nfrom deepmind.models.user import User, Role, user_roles\nfrom deepmind.services.database import get_session\n\nlog = structlog.get_logger()\n\n# JWT Configuration — defaults, overridden by config/app.yaml auth section\nJWT_ALGORITHM = "HS256"\nACCESS_TOKEN_EXPIRE_MINUTES = 15\nREFRESH_TOKEN_EXPIRE_DAYS = 7\n\n\nclass AuthService:\n    \"\"\"Enterprise authentication service with JWT token management.\"\"\"\n\n    def __init__(self):\n        self.cfg = get_config()\n        self.secret_key = self._resolve_secret_key()\n        self.refresh_secret_key = self._resolve_refresh_secret_key()\n\n        # Load auth config if available\n        auth_cfg = getattr(self.cfg, "auth", None)\n        if auth_cfg:\n            self.access_expire_minutes = getattr(auth_cfg, "jwt_access_expiry_minutes", ACCESS_TOKEN_EXPIRE_MINUTES)\n            self.refresh_expire_days = getattr(auth_cfg, "jwt_refresh_expiry_days", REFRESH_TOKEN_EXPIRE_DAYS)\n            self.bcrypt_rounds = getattr(auth_cfg, "bcrypt_rounds", 12)\n        else:\n            self.access_expire_minutes = ACCESS_TOKEN_EXPIRE_MINUTES\n            self.refresh_expire_days = REFRESH_TOKEN_EXPIRE_DAYS\n            self.bcrypt_rounds = 12\n\n    def _resolve_secret_key(self) -> str:\n        \"\"\"Resolve JWT secret key from env or config.\"\"\"\n        key = os.environ.get("JWT_SECRET_KEY", "") or self.cfg.app.secret_key\n        if not key or len(key) < 32:\n            raise ValueError(\n                "JWT_SECRET_KEY (or APP_SECRET_KEY) must be set and at least 32 characters. "\n                "Generate with: python -c 'import secrets; print(secrets.token_urlsafe(64))'"\n            )\n        return key\n\n    def _resolve_refresh_secret_key(self) -> str:\n        \"\"\"Resolve separate refresh token secret key.\"\"\"\n        key = os.environ.get("JWT_REFRESH_SECRET_KEY", "")\n        if key and len(key) >= 32:\n            return key\n        # Fall back to primary secret with suffix for separation\n        return self.secret_key + "_refresh"\n\n    def create_access_token(self, user_id: str, username: str, roles: list[str]) -> str:\n        \"\"\"Create JWT access token (short-lived, 15 min default).\"\"\"\n        expire = datetime.now(timezone.utc) + timedelta(minutes=self.access_expire_minutes)\n        to_encode = {\n            "sub": str(user_id),\n            "username": username,\n            "roles": roles,\n            "type": "access",\n            "exp": expire,\n            "iat": datetime.now(timezone.utc),\n            "jti": str(uuid.uuid4()),\n        }\n        return jwt.encode(to_encode, self.secret_key, algorithm=JWT_ALGORITHM)\n\n    def create_refresh_token(self, user_id: str) -> str:\n        \"\"\"Create JWT refresh token (long-lived, 7 day default).\"\"\"\n        expire = datetime.now(timezone.utc) + timedelta(days=self.refresh_expire_days)\n        to_encode = {\n            "sub": str(user_id),\n            "type": "refresh",\n            "exp": expire,\n            "iat": datetime.now(timezone.utc),\n            "jti": str(uuid.uuid4()),\n        }\n        return jwt.encode(to_encode, self.refresh_secret_key, algorithm=JWT_ALGORITHM)\n\n    def verify_token(self, token: str, token_type: str = "access") -> Optional[Dict[str, Any]]:\n        \"\"\"\n        Verify and decode JWT token.\n\n        Args:\n            token: JWT token string\n            token_type: Expected token type ('access' or 'refresh')\n\n        Returns:\n            Decoded payload if valid, None otherwise\n        \"\"\"\n        secret = self.refresh_secret_key if token_type == "refresh" else self.secret_key\n        try:\n            payload = jwt.decode(token, secret, algorithms=[JWT_ALGORITHM])\n\n            # Verify token type matches expected\n            if payload.get("type") != token_type:\n                log.warning(\n                    "token_type_mismatch",\n                    expected=token_type,\n                    actual=payload.get("type"),\n                )\n                return None\n\n            return payload\n\n        except JWTError as e:\n            log.warning("jwt_verification_failed", error=str(e))\n            return None\n\n    async def authenticate_user(\n        self, username: str, password: str, ip_address: Optional[str] = None\n    ) -> Optional[User]:\n        \"\"\"\n        Authenticate user with username/email and password.\n        Records login attempts and enforces account lockout.\n\n        Args:\n            username: Username or email\n            password: Plain text password\n            ip_address: Client IP for audit trail\n\n        Returns:\n            User object if authentication succeeds, None otherwise\n        \"\"\"\n        async with get_session() as session:\n            stmt = (\n                select(User)\n                .options(selectinload(User.roles))\n                .where((User.username == username) | (User.email == username))\n            )\n            result = await session.execute(stmt)\n            user = result.scalar_one_or_none()\n\n            if not user:\n                log.info("auth_failed", reason="user_not_found", username=username)\n                return None\n\n            if not user.is_active:\n                log.info("auth_failed", reason="user_inactive", user_id=user.id)\n                return None\n\n            if user.is_locked:\n                log.info("auth_failed", reason="account_locked", user_id=user.id)\n                return None\n\n            if not user.verify_password(password):\n                user.record_login_attempt(success=False, ip_address=ip_address)\n                await session.commit()\n                log.info("auth_failed", reason="invalid_password", user_id=user.id)\n                return None\n\n            # Successful authentication\n            user.record_login_attempt(success=True, ip_address=ip_address)\n            await session.commit()\n\n            log.info("auth_success", user_id=user.id, username=user.username)\n            return user\n\n    async def get_user_by_id(self, user_id: str) -> Optional[User]:\n        \"\"\"Retrieve user by ID with roles eagerly loaded.\"\"\"\n        async with get_session() as session:\n            stmt = (\n                select(User)\n                .options(selectinload(User.roles))\n                .where(User.id == str(user_id))\n            )\n            result = await session.execute(stmt)\n            return result.scalar_one_or_none()\n\n    async def create_user(\n        self,\n        username: str,\n        email: str,\n        password: str,\n        full_name: Optional[str] = None,\n        is_superuser: bool = False,\n    ) -> User:\n        \"\"\"\n        Create new user with hashed password.\n\n        Args:\n            username: Unique username\n            email: Unique email\n            password: Plain text password (will be bcrypt hashed)\n            full_name: Optional full name\n            is_superuser: Whether user is superuser\n\n        Returns:\n            Created User object\n\n        Raises:\n            ValueError: If username or email already exists\n        \"\"\"\n        async with get_session() as session:\n            # Check uniqueness\n            stmt = select(User).where(\n                (User.username == username) | (User.email == email)\n            )\n            result = await session.execute(stmt)\n            if result.scalar_one_or_none():\n                raise ValueError("Username or email already exists")\n\n            user = User(\n                id=str(uuid.uuid4()),\n                username=username,\n                email=email,\n                full_name=full_name,\n                is_superuser=is_superuser,\n            )\n            user.set_password(password, cost_factor=self.bcrypt_rounds)\n\n            # Assign default 'user' role if it exists\n            role_stmt = select(Role).where(Role.name == "user")\n            role_result = await session.execute(role_stmt)\n            default_role = role_result.scalar_one_or_none()\n            if default_role:\n                user.roles.append(default_role)\n\n            session.add(user)\n            await session.commit()\n            await session.refresh(user)\n\n            log.info("user_created", user_id=user.id, username=user.username)\n            return user\n\n    def create_token_pair(self, user: User) -> Dict[str, str]:\n        \"\"\"\n        Create access + refresh token pair for user.\n\n        Args:\n            user: User object\n\n        Returns:\n            Dict with 'access_token' and 'refresh_token'\n        \"\"\"\n        roles = [role.name for role in user.roles]\n        return {\n            "access_token": self.create_access_token(\n                str(user.id), user.username, roles\n            ),\n            "refresh_token": self.create_refresh_token(str(user.id)),\n        }\n\n\n# Singleton\n_auth_service: Optional[AuthService] = None\n\n\ndef get_auth_service() -> AuthService:\n    \"\"\"Get singleton AuthService instance.\"\"\"\n    global _auth_service\n    if _auth_service is None:\n        _auth_service = AuthService()\n    return _auth_service\n
+"""
+Authentication Service — JWT generation, validation, password verification, token refresh.
+Enterprise-grade security with proper expiration, refresh tokens, and secure secret handling.
+"""
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Dict, Any
+import structlog
+
+from jose import JWTError, jwt
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+
+from deepmind.config import get_config
+from deepmind.models.user import User, Role, user_roles
+from deepmind.services.database import get_session
+from deepmind.services.secrets_manager import get_secrets_manager
+
+log = structlog.get_logger()
+
+# JWT Configuration — defaults, overridden by config/app.yaml auth section
+JWT_ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 15
+REFRESH_TOKEN_EXPIRE_DAYS = 7
+
+
+class AuthService:
+    """Enterprise authentication service with JWT token management."""
+
+    def __init__(self):
+        self.cfg = get_config()
+        self._sm = get_secrets_manager()
+        self.secret_key = self._resolve_secret_key()
+        self.refresh_secret_key = self._resolve_refresh_secret_key()
+
+        # Load auth config if available
+        auth_cfg = getattr(self.cfg, "auth", None)
+        if auth_cfg:
+            self.access_expire_minutes = getattr(auth_cfg, "jwt_access_expiry_minutes", ACCESS_TOKEN_EXPIRE_MINUTES)
+            self.refresh_expire_days = getattr(auth_cfg, "jwt_refresh_expiry_days", REFRESH_TOKEN_EXPIRE_DAYS)
+            self.bcrypt_rounds = getattr(auth_cfg, "bcrypt_rounds", 12)
+        else:
+            self.access_expire_minutes = ACCESS_TOKEN_EXPIRE_MINUTES
+            self.refresh_expire_days = REFRESH_TOKEN_EXPIRE_DAYS
+            self.bcrypt_rounds = 12
+
+    def _resolve_secret_key(self) -> str:
+        """Resolve JWT secret key via secrets manager."""
+        key = self._sm.get("JWT_SECRET_KEY") or self._sm.get("APP_SECRET_KEY")
+        if not key or len(key) < 32:
+            raise ValueError(
+                "JWT_SECRET_KEY (or APP_SECRET_KEY) must be set and at least 32 characters. "
+                "Generate with: python scripts/generate_secrets.py"
+            )
+        return key
+
+    def _resolve_refresh_secret_key(self) -> str:
+        """Resolve separate refresh token secret key via secrets manager."""
+        key = self._sm.get("JWT_REFRESH_SECRET_KEY")
+        if key and len(key) >= 32:
+            return key
+        # Fall back to primary secret with suffix for separation
+        return self.secret_key + "_refresh"
+
+    def create_access_token(self, user_id: str, username: str, roles: list[str]) -> str:
+        """Create JWT access token (short-lived, 15 min default)."""
+        expire = datetime.now(timezone.utc) + timedelta(minutes=self.access_expire_minutes)
+        to_encode = {
+            "sub": str(user_id),
+            "username": username,
+            "roles": roles,
+            "type": "access",
+            "exp": expire,
+            "iat": datetime.now(timezone.utc),
+            "jti": str(uuid.uuid4()),
+        }
+        return jwt.encode(to_encode, self.secret_key, algorithm=JWT_ALGORITHM)
+
+    def create_refresh_token(self, user_id: str) -> str:
+        """Create JWT refresh token (long-lived, 7 day default)."""
+        expire = datetime.now(timezone.utc) + timedelta(days=self.refresh_expire_days)
+        to_encode = {
+            "sub": str(user_id),
+            "type": "refresh",
+            "exp": expire,
+            "iat": datetime.now(timezone.utc),
+            "jti": str(uuid.uuid4()),
+        }
+        return jwt.encode(to_encode, self.refresh_secret_key, algorithm=JWT_ALGORITHM)
+
+    def verify_token(self, token: str, token_type: str = "access") -> Optional[Dict[str, Any]]:
+        """
+        Verify and decode JWT token.
+
+        Args:
+            token: JWT token string
+            token_type: Expected token type ('access' or 'refresh')
+
+        Returns:
+            Decoded payload if valid, None otherwise
+        """
+        secret = self.refresh_secret_key if token_type == "refresh" else self.secret_key
+        try:
+            payload = jwt.decode(token, secret, algorithms=[JWT_ALGORITHM])
+
+            # Verify token type matches expected
+            if payload.get("type") != token_type:
+                log.warning(
+                    "token_type_mismatch",
+                    expected=token_type,
+                    actual=payload.get("type"),
+                )
+                return None
+
+            return payload
+
+        except JWTError as e:
+            log.warning("jwt_verification_failed", error=str(e))
+            return None
+
+    async def authenticate_user(
+        self, username: str, password: str, ip_address: Optional[str] = None
+    ) -> Optional[User]:
+        """
+        Authenticate user with username/email and password.
+        Records login attempts and enforces account lockout.
+
+        Args:
+            username: Username or email
+            password: Plain text password
+            ip_address: Client IP for audit trail
+
+        Returns:
+            User object if authentication succeeds, None otherwise
+        """
+        async with get_session() as session:
+            stmt = (
+                select(User)
+                .options(selectinload(User.roles))
+                .where((User.username == username) | (User.email == username))
+            )
+            result = await session.execute(stmt)
+            user = result.scalar_one_or_none()
+
+            if not user:
+                log.info("auth_failed", reason="user_not_found", username=username)
+                return None
+
+            if not user.is_active:
+                log.info("auth_failed", reason="user_inactive", user_id=user.id)
+                return None
+
+            if user.is_locked:
+                log.info("auth_failed", reason="account_locked", user_id=user.id)
+                return None
+
+            if not user.verify_password(password):
+                user.record_login_attempt(success=False, ip_address=ip_address)
+                await session.commit()
+                log.info("auth_failed", reason="invalid_password", user_id=user.id)
+                return None
+
+            # Successful authentication
+            user.record_login_attempt(success=True, ip_address=ip_address)
+            await session.commit()
+
+            log.info("auth_success", user_id=user.id, username=user.username)
+            return user
+
+    async def get_user_by_id(self, user_id: str) -> Optional[User]:
+        """Retrieve user by ID with roles eagerly loaded."""
+        async with get_session() as session:
+            stmt = (
+                select(User)
+                .options(selectinload(User.roles))
+                .where(User.id == str(user_id))
+            )
+            result = await session.execute(stmt)
+            return result.scalar_one_or_none()
+
+    async def create_user(
+        self,
+        username: str,
+        email: str,
+        password: str,
+        full_name: Optional[str] = None,
+        is_superuser: bool = False,
+    ) -> User:
+        """
+        Create new user with hashed password.
+
+        Args:
+            username: Unique username
+            email: Unique email
+            password: Plain text password (will be bcrypt hashed)
+            full_name: Optional full name
+            is_superuser: Whether user is superuser
+
+        Returns:
+            Created User object
+
+        Raises:
+            ValueError: If username or email already exists
+        """
+        async with get_session() as session:
+            # Check uniqueness
+            stmt = select(User).where(
+                (User.username == username) | (User.email == email)
+            )
+            result = await session.execute(stmt)
+            if result.scalar_one_or_none():
+                raise ValueError("Username or email already exists")
+
+            user = User(
+                id=str(uuid.uuid4()),
+                username=username,
+                email=email,
+                full_name=full_name,
+                is_superuser=is_superuser,
+            )
+            user.set_password(password, cost_factor=self.bcrypt_rounds)
+
+            # Assign default 'user' role if it exists
+            role_stmt = select(Role).where(Role.name == "user")
+            role_result = await session.execute(role_stmt)
+            default_role = role_result.scalar_one_or_none()
+            if default_role:
+                user.roles.append(default_role)
+
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+
+            log.info("user_created", user_id=user.id, username=user.username)
+            return user
+
+    def create_token_pair(self, user: User) -> Dict[str, str]:
+        """
+        Create access + refresh token pair for user.
+
+        Args:
+            user: User object
+
+        Returns:
+            Dict with 'access_token' and 'refresh_token'
+        """
+        roles = [role.name for role in user.roles]
+        return {
+            "access_token": self.create_access_token(
+                str(user.id), user.username, roles
+            ),
+            "refresh_token": self.create_refresh_token(str(user.id)),
+        }
+
+
+# Singleton
+_auth_service: Optional[AuthService] = None
+
+
+def get_auth_service() -> AuthService:
+    """Get singleton AuthService instance."""
+    global _auth_service
+    if _auth_service is None:
+        _auth_service = AuthService()
+    return _auth_service

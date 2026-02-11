@@ -1,8 +1,9 @@
 """OpenAI GPT-4o client for streaming chat responses."""
-import os
 from typing import AsyncGenerator, Optional
 import httpx
 import structlog
+
+from deepmind.services.secrets_manager import get_secrets_manager
 
 log = structlog.get_logger()
 
@@ -11,9 +12,10 @@ class OpenAIClient:
     """Client for OpenAI GPT-4o API with streaming support."""
     
     def __init__(self):
-        self.api_key = os.getenv("OPENAI_API_KEY")
-        self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        self.model = os.getenv("OPENAI_MODEL", "gpt-4o")
+        sm = get_secrets_manager()
+        self.api_key = sm.get("OPENAI_API_KEY")
+        self.base_url = sm.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        self.model = sm.get("OPENAI_MODEL", "gpt-4o")
         self.client = httpx.AsyncClient(timeout=120.0)
         self._closed = False
         
