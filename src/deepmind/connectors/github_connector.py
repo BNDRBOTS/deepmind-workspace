@@ -9,6 +9,7 @@ from github import Github, GithubException
 import structlog
 
 from deepmind.config import get_config
+from deepmind.services.secrets_manager import get_secrets_manager
 from deepmind.connectors.base import (
     BaseConnector, ConnectorStatus, DocumentInfo, FolderInfo
 )
@@ -29,10 +30,11 @@ class GitHubConnector(BaseConnector):
     
     async def connect(self) -> bool:
         try:
-            if not self.cfg.token:
+            token = get_secrets_manager().get("GITHUB_TOKEN", self.cfg.token)
+            if not token:
                 self._status = ConnectorStatus.ERROR
                 return False
-            self._github = Github(self.cfg.token)
+            self._github = Github(token)
             # Verify connection
             user = self._github.get_user()
             _ = user.login
