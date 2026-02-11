@@ -1,1 +1,231 @@
-"""\nFLUX Image Generation Client using Together AI.\nSupports multiple FLUX models including unfiltered pro/ultra variants.\nInline ChatGPT-style rendering with disk storage.\n"""\nimport os\nimport httpx\nimport base64\nimport hashlib\nimport time\nfrom typing import Optional, Dict, Literal\nfrom pathlib import Path\nimport structlog\n\nfrom deepmind.config import get_config\n\nlog = structlog.get_logger()\n\nModelType = Literal["ultra", "pro", "dev", "schnell"]\n\n\nclass FluxClient:\n    """\n    Client for FLUX image generation via Together AI.\n    \n    Supported models:\n    - ultra: FLUX.1-pro-ultra (2048x2048, unfiltered, highest quality)\n    - pro: FLUX.1-pro (1440x1440, unfiltered, high quality) **DEFAULT**\n    - dev: FLUX.1-dev (1024x1024, unfiltered, good quality)\n    - schnell: FLUX.1-schnell (1024x768, filtered, fast preview)\n    """\n    \n    def __init__(self):\n        cfg = get_config()\n        \n        self.api_key = cfg.image_generation.api_key\n        self.base_url = cfg.image_generation.base_url\n        self.models = cfg.image_generation.models\n        self.default_model = cfg.image_generation.default_model\n        self.timeout = cfg.image_generation.timeout_seconds\n        self.output_dir = Path(cfg.image_generation.output_dir)\n        self.save_to_disk = cfg.image_generation.save_to_disk\n        \n        self.client = httpx.AsyncClient(timeout=self.timeout)\n        self._closed = False\n        \n        # Ensure output directory exists\n        if self.save_to_disk:\n            self.output_dir.mkdir(parents=True, exist_ok=True)\n        \n        if not self.api_key:\n            log.warning("flux_client_no_key", message="TOGETHER_API_KEY not set")\n    \n    async def generate_image(\n        self,\n        prompt: str,\n        model: ModelType = None,\n        width: Optional[int] = None,\n        height: Optional[int] = None,\n        steps: Optional[int] = None,\n    ) -> Dict[str, any]:\n        """\n        Generate image from text prompt.\n        \n        Args:\n            prompt: Text description of desired image\n            model: Model to use (ultra/pro/dev/schnell) - defaults to 'pro'\n            width: Image width (uses model default if None)\n            height: Image height (uses model default if None)\n            steps: Inference steps (uses model default if None)\n            \n        Returns:\n            Dict with keys:\n                - success: bool\n                - image_path: str (local file path for inline display)\n                - image_url: str (file:// URL for rendering)\n                - prompt: str (original prompt)\n                - model: str (model used)\n                - width: int\n                - height: int\n                - unfiltered: bool (whether model is unfiltered)\n                - error: str (if failed)\n        """\n        if not self.api_key:\n            return {\n                "success": False,\n                "error": "TOGETHER_API_KEY not configured",\n                "prompt": prompt,\n            }\n        \n        # Select model\n        model_key = model or self.default_model\n        \n        # Validate model exists\n        if not hasattr(self.models, model_key):\n            return {\n                "success": False,\n                "error": f"Invalid model: {model_key}. Valid options: ultra, pro, dev, schnell",\n                "prompt": prompt,\n            }\n        \n        model_config = getattr(self.models, model_key)\n        \n        model_name = model_config.name\n        width = width or model_config.max_width\n        height = height or model_config.max_height\n        steps = steps or model_config.steps\n        \n        headers = {\n            "Authorization": f"Bearer {self.api_key}",\n            "Content-Type": "application/json",\n        }\n        \n        payload = {\n            "model": model_name,\n            "prompt": prompt,\n            "width": width,\n            "height": height,\n            "steps": steps,\n            "n": 1,\n            "response_format": "b64_json",\n        }\n        \n        try:\n            log.info(\n                "flux_generate_start",\n                prompt=prompt[:100],\n                model=model_key,\n                unfiltered=model_config.unfiltered,\n            )\n            \n            response = await self.client.post(\n                f"{self.base_url}/images/generations",\n                json=payload,\n                headers=headers,\n            )\n            response.raise_for_status()\n            \n            data = response.json()\n            \n            if "data" not in data or len(data["data"]) == 0:\n                raise ValueError("No image data in response")\n            \n            image_b64 = data["data"][0]["b64_json"]\n            image_bytes = base64.b64decode(image_b64)\n            \n            # Generate unique filename\n            timestamp = int(time.time())\n            prompt_hash = hashlib.md5(prompt.encode()).hexdigest()[:8]\n            filename = f"flux_{model_key}_{timestamp}_{prompt_hash}.png"\n            \n            # Save to disk for inline display\n            image_path = None\n            image_url = None\n            \n            if self.save_to_disk:\n                image_path = self.output_dir / filename\n                image_path.write_bytes(image_bytes)\n                \n                # Create file:// URL for NiceGUI rendering\n                image_url = f"file://{image_path.absolute()}"\n                \n                log.info(\n                    "flux_image_saved",\n                    path=str(image_path),\n                    size_kb=len(image_bytes) / 1024,\n                )\n            \n            log.info(\n                "flux_generate_success",\n                prompt=prompt[:100],\n                model=model_key,\n                unfiltered=model_config.unfiltered,\n            )\n            \n            return {\n                "success": True,\n                "image_path": str(image_path) if image_path else None,\n                "image_url": image_url,\n                "base64_data": image_b64,  # Fallback for display\n                "prompt": prompt,\n                "model": model_key,\n                "model_name": model_name,\n                "width": width,\n                "height": height,\n                "unfiltered": model_config.unfiltered,\n                "cost_estimate": model_config.cost_per_image,\n            }\n        \n        except httpx.HTTPStatusError as e:\n            error_msg = f"Together AI API error: {e.response.status_code}"\n            try:\n                error_detail = e.response.json()\n                error_msg += f" - {error_detail.get('error', {}).get('message', '')}"\n            except:\n                pass\n            \n            log.error("flux_http_error", error=error_msg)\n            return {\n                "success": False,\n                "error": error_msg,\n                "prompt": prompt,\n            }\n        \n        except Exception as e:\n            log.error("flux_generate_error", error=str(e))\n            return {\n                "success": False,\n                "error": str(e),\n                "prompt": prompt,\n            }\n    \n    async def close(self):\n        """Close the HTTP client."""\n        if not self._closed:\n            await self.client.aclose()\n            self._closed = True\n            log.info("flux_client_closed")\n\n\n# Singleton instance\n_client: Optional[FluxClient] = None\n\n\ndef get_flux_client() -> FluxClient:\n    """Get the singleton FLUX client instance."""\n    global _client\n    if _client is None:\n        _client = FluxClient()\n    return _client\n
+"""
+FLUX Image Generation Client using Together AI.
+Supports multiple FLUX models including unfiltered pro/ultra variants.
+Inline ChatGPT-style rendering with disk storage.
+"""
+import os
+import httpx
+import base64
+import hashlib
+import time
+from typing import Optional, Dict, Literal
+from pathlib import Path
+import structlog
+
+from deepmind.config import get_config
+from deepmind.services.secrets_manager import get_secrets_manager
+
+log = structlog.get_logger()
+
+ModelType = Literal["ultra", "pro", "dev", "schnell"]
+
+
+class FluxClient:
+    """
+    Client for FLUX image generation via Together AI.
+    
+    Supported models:
+    - ultra: FLUX.1-pro-ultra (2048x2048, unfiltered, highest quality)
+    - pro: FLUX.1-pro (1440x1440, unfiltered, high quality) **DEFAULT**
+    - dev: FLUX.1-dev (1024x1024, unfiltered, good quality)
+    - schnell: FLUX.1-schnell (1024x768, filtered, fast preview)
+    """
+    
+    def __init__(self):
+        cfg = get_config()
+        
+        self.api_key = get_secrets_manager().get("TOGETHER_API_KEY", cfg.image_generation.api_key)
+        self.base_url = cfg.image_generation.base_url
+        self.models = cfg.image_generation.models
+        self.default_model = cfg.image_generation.default_model
+        self.timeout = cfg.image_generation.timeout_seconds
+        self.output_dir = Path(cfg.image_generation.output_dir)
+        self.save_to_disk = cfg.image_generation.save_to_disk
+        
+        self.client = httpx.AsyncClient(timeout=self.timeout)
+        self._closed = False
+        
+        # Ensure output directory exists
+        if self.save_to_disk:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        if not self.api_key:
+            log.warning("flux_client_no_key", message="TOGETHER_API_KEY not set")
+    
+    async def generate_image(
+        self,
+        prompt: str,
+        model: ModelType = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        steps: Optional[int] = None,
+    ) -> Dict[str, any]:
+        """
+        Generate image from text prompt.
+        
+        Args:
+            prompt: Text description of desired image
+            model: Model to use (ultra/pro/dev/schnell) - defaults to 'pro'
+            width: Image width (uses model default if None)
+            height: Image height (uses model default if None)
+            steps: Inference steps (uses model default if None)
+            
+        Returns:
+            Dict with keys:
+                - success: bool
+                - image_path: str (local file path for inline display)
+                - image_url: str (file:// URL for rendering)
+                - prompt: str (original prompt)
+                - model: str (model used)
+                - width: int
+                - height: int
+                - unfiltered: bool (whether model is unfiltered)
+                - error: str (if failed)
+        """
+        if not self.api_key:
+            return {
+                "success": False,
+                "error": "TOGETHER_API_KEY not configured",
+                "prompt": prompt,
+            }
+        
+        # Select model
+        model_key = model or self.default_model
+        
+        # Validate model exists
+        if not hasattr(self.models, model_key):
+            return {
+                "success": False,
+                "error": f"Invalid model: {model_key}. Valid options: ultra, pro, dev, schnell",
+                "prompt": prompt,
+            }
+        
+        model_config = getattr(self.models, model_key)
+        
+        model_name = model_config.name
+        width = width or model_config.max_width
+        height = height or model_config.max_height
+        steps = steps or model_config.steps
+        
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        
+        payload = {
+            "model": model_name,
+            "prompt": prompt,
+            "width": width,
+            "height": height,
+            "steps": steps,
+            "n": 1,
+            "response_format": "b64_json",
+        }
+        
+        try:
+            log.info(
+                "flux_generate_start",
+                prompt=prompt[:100],
+                model=model_key,
+                unfiltered=model_config.unfiltered,
+            )
+            
+            response = await self.client.post(
+                f"{self.base_url}/images/generations",
+                json=payload,
+                headers=headers,
+            )
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if "data" not in data or len(data["data"]) == 0:
+                raise ValueError("No image data in response")
+            
+            image_b64 = data["data"][0]["b64_json"]
+            image_bytes = base64.b64decode(image_b64)
+            
+            # Generate unique filename
+            timestamp = int(time.time())
+            prompt_hash = hashlib.md5(prompt.encode()).hexdigest()[:8]
+            filename = f"flux_{model_key}_{timestamp}_{prompt_hash}.png"
+            
+            # Save to disk for inline display
+            image_path = None
+            image_url = None
+            
+            if self.save_to_disk:
+                image_path = self.output_dir / filename
+                image_path.write_bytes(image_bytes)
+                
+                # Create file:// URL for NiceGUI rendering
+                image_url = f"file://{image_path.absolute()}"
+                
+                log.info(
+                    "flux_image_saved",
+                    path=str(image_path),
+                    size_kb=len(image_bytes) / 1024,
+                )
+            
+            log.info(
+                "flux_generate_success",
+                prompt=prompt[:100],
+                model=model_key,
+                unfiltered=model_config.unfiltered,
+            )
+            
+            return {
+                "success": True,
+                "image_path": str(image_path) if image_path else None,
+                "image_url": image_url,
+                "base64_data": image_b64,  # Fallback for display
+                "prompt": prompt,
+                "model": model_key,
+                "model_name": model_name,
+                "width": width,
+                "height": height,
+                "unfiltered": model_config.unfiltered,
+                "cost_estimate": model_config.cost_per_image,
+            }
+        
+        except httpx.HTTPStatusError as e:
+            error_msg = f"Together AI API error: {e.response.status_code}"
+            try:
+                error_detail = e.response.json()
+                error_msg += f" - {error_detail.get('error', {}).get('message', '')}"
+            except:
+                pass
+            
+            log.error("flux_http_error", error=error_msg)
+            return {
+                "success": False,
+                "error": error_msg,
+                "prompt": prompt,
+            }
+        
+        except Exception as e:
+            log.error("flux_generate_error", error=str(e))
+            return {
+                "success": False,
+                "error": str(e),
+                "prompt": prompt,
+            }
+    
+    async def close(self):
+        """Close the HTTP client."""
+        if not self._closed:
+            await self.client.aclose()
+            self._closed = True
+            log.info("flux_client_closed")
+
+
+# Singleton instance
+_client: Optional[FluxClient] = None
+
+
+def get_flux_client() -> FluxClient:
+    """Get the singleton FLUX client instance."""
+    global _client
+    if _client is None:
+        _client = FluxClient()
+    return _client
