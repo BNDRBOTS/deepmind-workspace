@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 import structlog
 
 from deepmind.config import get_config
+from deepmind.services.secrets_manager import get_secrets_manager
 from deepmind.connectors.base import (
     BaseConnector, ConnectorStatus, DocumentInfo, FolderInfo
 )
@@ -28,14 +29,20 @@ class DropboxConnector(BaseConnector):
     async def connect(self) -> bool:
         try:
             import dropbox
-            if not self.cfg.refresh_token:
+            
+            sm = get_secrets_manager()
+            refresh_token = sm.get("DROPBOX_REFRESH_TOKEN", self.cfg.refresh_token)
+            app_key = sm.get("DROPBOX_APP_KEY", self.cfg.app_key)
+            app_secret = sm.get("DROPBOX_APP_SECRET", self.cfg.app_secret)
+            
+            if not refresh_token:
                 self._status = ConnectorStatus.ERROR
                 return False
             
             self._dbx = dropbox.Dropbox(
-                oauth2_refresh_token=self.cfg.refresh_token,
-                app_key=self.cfg.app_key,
-                app_secret=self.cfg.app_secret,
+                oauth2_refresh_token=refresh_token,
+                app_key=app_key,
+                app_secret=app_secret,
             )
             account = self._dbx.users_get_current_account()
             self._status = ConnectorStatus.CONNECTED
