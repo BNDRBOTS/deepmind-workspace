@@ -11,6 +11,7 @@ import io
 import structlog
 
 from deepmind.config import get_config
+from deepmind.services.secrets_manager import get_secrets_manager
 from deepmind.connectors.base import (
     BaseConnector, ConnectorStatus, DocumentInfo, FolderInfo
 )
@@ -47,7 +48,11 @@ class GoogleDriveConnector(BaseConnector):
             from google.oauth2.credentials import Credentials
             from googleapiclient.discovery import build
             
-            if not self.cfg.client_id or not self.cfg.client_secret:
+            sm = get_secrets_manager()
+            client_id = sm.get("GOOGLE_CLIENT_ID", self.cfg.client_id)
+            client_secret = sm.get("GOOGLE_CLIENT_SECRET", self.cfg.client_secret)
+            
+            if not client_id or not client_secret:
                 self._status = ConnectorStatus.ERROR
                 return False
             
@@ -216,11 +221,15 @@ class GoogleDriveConnector(BaseConnector):
         """Generate OAuth authorization URL for user consent."""
         from google_auth_oauthlib.flow import Flow
         
+        sm = get_secrets_manager()
+        client_id = sm.get("GOOGLE_CLIENT_ID", self.cfg.client_id)
+        client_secret = sm.get("GOOGLE_CLIENT_SECRET", self.cfg.client_secret)
+        
         flow = Flow.from_client_config(
             {
                 "web": {
-                    "client_id": self.cfg.client_id,
-                    "client_secret": self.cfg.client_secret,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
                     "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                     "token_uri": "https://oauth2.googleapis.com/token",
                     "redirect_uris": [self.cfg.redirect_uri],
@@ -241,11 +250,15 @@ class GoogleDriveConnector(BaseConnector):
         try:
             from google_auth_oauthlib.flow import Flow
             
+            sm = get_secrets_manager()
+            client_id = sm.get("GOOGLE_CLIENT_ID", self.cfg.client_id)
+            client_secret = sm.get("GOOGLE_CLIENT_SECRET", self.cfg.client_secret)
+            
             flow = Flow.from_client_config(
                 {
                     "web": {
-                        "client_id": self.cfg.client_id,
-                        "client_secret": self.cfg.client_secret,
+                        "client_id": client_id,
+                        "client_secret": client_secret,
                         "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                         "token_uri": "https://oauth2.googleapis.com/token",
                         "redirect_uris": [self.cfg.redirect_uri],
