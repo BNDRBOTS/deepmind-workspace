@@ -48,6 +48,22 @@ class AppConfig:
 
 
 @dataclass
+class AuthConfig:
+    """Authentication & authorization configuration (Phase 1 Security)."""
+    jwt_access_expiry_minutes: int = 15
+    jwt_refresh_expiry_days: int = 7
+    jwt_algorithm: str = "HS256"
+    bcrypt_rounds: int = 12
+    session_cookie_secure: bool = True
+    session_cookie_httponly: bool = True
+    session_cookie_samesite: str = "lax"
+    account_lockout_threshold: int = 5
+    account_lockout_duration_minutes: int = 15
+    password_min_length: int = 8
+    require_email_verification: bool = False
+
+
+@dataclass
 class DeepSeekConfig:
     api_key: str = ""
     base_url: str = "https://api.deepseek.com/v1"
@@ -274,6 +290,7 @@ class UIConfig:
 @dataclass
 class Config:
     app: AppConfig = field(default_factory=AppConfig)
+    auth: AuthConfig = field(default_factory=AuthConfig)
     deepseek: DeepSeekConfig = field(default_factory=DeepSeekConfig)
     openai: OpenAIConfig = field(default_factory=OpenAIConfig)
     code_execution: CodeExecutionConfig = field(default_factory=CodeExecutionConfig)
@@ -339,6 +356,10 @@ def load_config(config_path: Optional[str] = None) -> Config:
             "secret_key_auto_generated",
             message="APP_SECRET_KEY not set - auto-generated. Sessions will reset on restart. Set APP_SECRET_KEY env var for persistence."
         )
+    
+    # Parse auth config
+    if "auth" in resolved:
+        cfg.auth = AuthConfig(**{k: v for k, v in resolved["auth"].items() if hasattr(cfg.auth, k)})
     
     if "deepseek" in resolved:
         cfg.deepseek = DeepSeekConfig(**{k: v for k, v in resolved["deepseek"].items() if hasattr(cfg.deepseek, k)})

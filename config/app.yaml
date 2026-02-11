@@ -12,6 +12,23 @@ app:
   env: "${APP_ENV:production}"
   log_level: "${APP_LOG_LEVEL:INFO}"
 
+# ============================================================================
+# Authentication & Authorization (Phase 1 Security Hardening)
+# ============================================================================
+
+auth:
+  jwt_access_expiry_minutes: 15
+  jwt_refresh_expiry_days: 7
+  jwt_algorithm: "HS256"
+  bcrypt_rounds: 12
+  session_cookie_secure: true
+  session_cookie_httponly: true
+  session_cookie_samesite: "lax"
+  account_lockout_threshold: 5
+  account_lockout_duration_minutes: 15
+  password_min_length: 8
+  require_email_verification: false
+
 deepseek:
   api_key: "${DEEPSEEK_API_KEY}"
   base_url: "${DEEPSEEK_BASE_URL:https://api.deepseek.com/v1}"
@@ -39,21 +56,20 @@ openai:
 
 code_execution:
   enabled: true
-  timeout_seconds: 300  # 5 minutes - fully configurable via UI
-  max_output_bytes: 10485760  # 10MB - fully configurable
+  timeout_seconds: 300
+  max_output_bytes: 10485760
   max_recursion_depth: 1000
-  allow_network: false  # Security: no external requests from code
-  restricted_python: true  # AST-level sandboxing
+  allow_network: false
+  restricted_python: true
 
 image_generation:
   enabled: true
-  provider: "together"  # Together AI for FLUX models
+  provider: "together"
   api_key: "${TOGETHER_API_KEY}"
   base_url: "${TOGETHER_BASE_URL:https://api.together.xyz/v1}"
   
-  # Model selection (priority order)
   models:
-    ultra:  # Highest quality, unfiltered
+    ultra:
       name: "black-forest-labs/FLUX.1.1-pro"
       max_width: 2048
       max_height: 2048
@@ -61,7 +77,7 @@ image_generation:
       cost_per_image: 0.04
       unfiltered: true
     
-    pro:  # High quality, unfiltered  
+    pro:
       name: "black-forest-labs/FLUX.1-pro"
       max_width: 1440
       max_height: 1440
@@ -69,7 +85,7 @@ image_generation:
       cost_per_image: 0.02
       unfiltered: true
     
-    dev:  # Good quality, fast
+    dev:
       name: "black-forest-labs/FLUX.1-dev"
       max_width: 1024
       max_height: 1024
@@ -77,7 +93,7 @@ image_generation:
       cost_per_image: 0.01
       unfiltered: true
     
-    schnell:  # Fast preview
+    schnell:
       name: "black-forest-labs/FLUX.1-schnell"
       max_width: 1024
       max_height: 768
@@ -85,14 +101,14 @@ image_generation:
       cost_per_image: 0.005
       unfiltered: false
   
-  default_model: "pro"  # Balance of quality/speed/cost
+  default_model: "pro"
   default_width: 1024
   default_height: 1024
   timeout_seconds: 180
   retry_attempts: 2
   save_to_disk: true
   output_dir: "/data/generated_images"
-  inline_display: true  # ChatGPT-style inline rendering
+  inline_display: true
 
 database:
   sqlite_path: "${SQLITE_DB_PATH:./data/conversations.db}"
@@ -183,12 +199,11 @@ ui:
   font_family: "Inter, system-ui, -apple-system, sans-serif"
   code_font: "JetBrains Mono, Fira Code, monospace"
   
-  # Tool controls (smooth sliders/toggles)
   code_controls:
     show_timeout_slider: true
     show_output_limit_slider: true
     timeout_min: 10
-    timeout_max: 600  # 10 minutes max
+    timeout_max: 600
     output_limit_presets: ["1MB", "10MB", "50MB", "100MB"]
   
   image_controls:
