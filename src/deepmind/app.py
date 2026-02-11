@@ -9,12 +9,14 @@ from contextlib import asynccontextmanager
 from nicegui import ui, app as nicegui_app
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from slowapi.errors import RateLimitExceeded
 
 from deepmind.config import load_config
 from deepmind.services.database import init_database, close_database
 from deepmind.connectors.registry import get_connector_registry
 from deepmind.api.routes import router as api_router
 from deepmind.api.auth_routes import router as auth_router
+from deepmind.middleware.rate_limiter import get_limiter, rate_limit_exceeded_handler
 from deepmind.ui.pages import WorkspaceUI
 
 log = structlog.get_logger()
@@ -22,9 +24,18 @@ log = structlog.get_logger()
 # Load config early
 cfg = load_config()
 
+# Initialize rate limiter
+limiter = get_limiter()
+
 # NiceGUI creates its own FastAPI app — we mount our API on it
 nicegui_app.include_router(api_router)
 nicegui_app.include_router(auth_router)
+
+# Register rate limiter with FastAPI app state
+nicegui_app.state.limiter = limiter
+
+# Add custom exception handler for rate limit exceeded
+nicegui_app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
 
 @nicegui_app.on_startup
@@ -37,7 +48,7 @@ async def startup():
     registry = get_connector_registry()
     await registry.connect_all()
     
-    log.info("app_started")
+    log.info("app_started", rate_limiting_enabled=cfg.rate_limits.enabled)
 
 
 @nicegui_app.on_shutdown
