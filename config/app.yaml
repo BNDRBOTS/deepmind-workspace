@@ -29,6 +29,26 @@ auth:
   password_min_length: 8
   require_email_verification: false
 
+# ============================================================================
+# Secrets Management (Chunk 1.2 — Enterprise Secrets Provider)
+# ============================================================================
+# provider options: environment | vault | aws | local_encrypted
+#
+# environment:       Reads from env vars / config interpolation (default, zero-config)
+# vault:             HashiCorp Vault KV v2 (requires hvac package)
+# aws:               AWS Secrets Manager (requires boto3 package)
+# local_encrypted:   AES-encrypted local file (requires cryptography package)
+# ============================================================================
+
+secrets:
+  provider: "${SECRETS_PROVIDER:environment}"
+  vault_url: "${VAULT_ADDR:}"
+  vault_mount: "secret"
+  vault_path: "deepmind"
+  aws_region: "${AWS_REGION:us-east-1}"
+  aws_secret_name: "${AWS_SECRET_NAME:deepmind/secrets}"
+  local_encrypted_path: "data/.secrets.enc"
+
 deepseek:
   api_key: "${DEEPSEEK_API_KEY}"
   base_url: "${DEEPSEEK_BASE_URL:https://api.deepseek.com/v1}"
