@@ -49,6 +49,37 @@ secrets:
   aws_secret_name: "${AWS_SECRET_NAME:deepmind/secrets}"
   local_encrypted_path: "data/.secrets.enc"
 
+# ============================================================================
+# Rate Limiting (Chunk 1.4 — DoS Protection & Quota Enforcement)
+# ============================================================================
+# Protects expensive endpoints from abuse via per-user quotas.
+# Uses Redis for distributed limiting (production) or in-memory (development).
+#
+# Limit format: "N/unit" where unit is second, minute, hour, day
+# Examples: "10/hour", "60/minute", "1000/day"
+# Can combine multiple limits: "10/hour;100/day"
+# ============================================================================
+
+rate_limits:
+  enabled: true
+  storage: "${RATE_LIMIT_STORAGE:redis}"  # redis | memory
+  redis_url: "${REDIS_URL:redis://localhost:6379/1}"
+  
+  # Per-endpoint limits (applied via @limiter.limit() decorators)
+  endpoints:
+    # Code execution - most expensive operation
+    code_execution: "10/hour"
+    
+    # Image generation - GPU-intensive
+    image_generation: "20/hour"
+    
+    # Chat messages - LLM API calls
+    chat_messages: "60/minute"
+    
+    # Authentication endpoints - brute force protection
+    auth_login: "5/minute"
+    auth_register: "3/hour"
+
 deepseek:
   api_key: "${DEEPSEEK_API_KEY}"
   base_url: "${DEEPSEEK_BASE_URL:https://api.deepseek.com/v1}"
