@@ -79,7 +79,7 @@ code_execution:
   timeout_seconds: 300
   max_output_bytes: 10485760
   max_recursion_depth: 1000
-  allow_network: false
+  allow_network: false  # Enforced via NetworkBlocker - blocks socket, urllib, httpx, requests at runtime
   restricted_python: true
 
 image_generation:
