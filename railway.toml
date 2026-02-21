@@ -1,0 +1,51 @@
+[build]
+builder = "NIXPACKS"
+watchPatterns = ["**/*.py", "**/*.ts", "**/*.tsx"]
+
+[deploy]
+numReplicas = 1
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+[[services]]
+name = "gateway"
+workdir = "backend/gateway"
+buildCommand = "pip install -r requirements.txt"
+startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT"
+healthcheck = "/health"
+port = 8000
+
+[[services]]
+name = "chat"
+workdir = "backend/services/01_chat"
+buildCommand = "pip install -r requirements.txt"
+startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT"
+port = 8001
+
+[[services]]
+name = "memory"
+workdir = "backend/services/04_memory"
+buildCommand = "pip install -r requirements.txt"
+startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT"
+port = 8004
+
+[[services]]
+name = "api"
+workdir = "backend/services/07_api"
+buildCommand = "pip install -r requirements.txt"
+startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT"
+port = 8007
+
+[[services]]
+name = "auth"
+workdir = "backend/services/15_auth"
+buildCommand = "pip install -r requirements.txt"
+startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT"
+port = 8015
+
+[[services]]
+name = "frontend"
+workdir = "frontend"
+buildCommand = "npm install && npm run build"
+startCommand = "npm run preview -- --host 0.0.0.0 --port $PORT"
+port = 3000
